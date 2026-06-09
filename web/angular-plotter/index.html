@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Function Plotter</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="sidebar">
+<h1>Function Plotter</h1>
+
+<label for="preset">Angular</label>
+<select id="preset">
+<option value="custom">Custom</option>
+<option value="-z*z">sp1 Linear (-z²)</option>
+<option value="-(x*x*x - 3.0*x*y*y)">sp2 Trigonal (-(x³ - 3xy²))</option>
+<option value="-x*y*z">sp3 Tetrahedral (-xyz)</option>
+<option value="x*x*x*x + y*y*y*y + z*z*z*z">Octahedral (x⁴+y⁴+z⁴)</option>
+<option value="x*y">Quadrupole (xy)</option>
+<option value="z">Dipole (z)</option>
+</select>
+
+<label for="expr">Angular expr <span class="hint">(x, y, z)</span></label>
+<input type="text" id="expr" value="-x*y*z" spellcheck="false">
+<div id="error"></div>
+
+<hr>
+
+<label>Plane size <span class="hint" id="val-planeSize">2.0</span></label>
+<input type="range" id="planeSize" min="0.1" max="5.0" step="0.1" value="2.0">
+
+<label>Color scale <span class="hint" id="val-colorScale">1.0</span></label>
+<input type="range" id="colorScale" min="0.1" max="5.0" step="0.1" value="1.0">
+
+<label for="radial">Radial</label>
+<select id="radial">
+<option value="none">None (1.0)</option>
+<option value="gaussian">Gaussian (exp(-r²))</option>
+<option value="slater">Slater (exp(-r))</option>
+<option value="lorentz">Lorentz (1/(1+r²))</option>
+<option value="morse">Morse ((1-e⁻ʳ)²)</option>
+<option value="smoothstep">Smoothstep (1 - smoothstep(0,1,r))</option>
+</select>
+
+<label>Colormap</label>
+<select id="colormap">
+<option value="seismic">Diverging (seismic)</option>
+<option value="heat">Heat</option>
+<option value="viridis">Viridis</option>
+<option value="coolwarm">Coolwarm</option>
+</select>
+
+<hr>
+
+<label>Cut origin</label>
+<div class="row3">
+<span class="ax">X</span><input type="number" id="ox" value="0" step="0.1">
+<span class="ax">Y</span><input type="number" id="oy" value="0" step="0.1">
+<span class="ax">Z</span><input type="number" id="oz" value="0" step="0.1">
+</div>
+
+<label>Cut normal</label>
+<div class="row3">
+<span class="ax">X</span><input type="number" id="nx" value="0" step="0.1">
+<span class="ax">Y</span><input type="number" id="ny" value="0" step="0.1">
+<span class="ax">Z</span><input type="number" id="nz" value="1" step="0.1">
+</div>
+<button id="resetNormal">Reset normal (0,0,1)</button>
+
+<label>Plane shift <span class="hint" id="val-shift">0.0</span></label>
+<input type="range" id="shift" min="-2.0" max="2.0" step="0.05" value="0.0">
+
+<div class="hint" style="margin-top:12px">Drag canvas to rotate view · Scroll to zoom color</div>
+</div>
+
+<div id="main">
+<div id="viewbox">
+  <div id="viewport">
+    <canvas id="glcanvas" width="512" height="512"></canvas>
+    <canvas id="overlay" width="560" height="560"></canvas>
+  </div>
+  <div id="colorbar-container">
+    <canvas id="colorbar" width="60" height="201"></canvas>
+    <div id="colorbar-labels">
+      <span id="cmax">+1.00</span>
+      <span id="cmin">-1.00</span>
+    </div>
+  </div>
+</div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

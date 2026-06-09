@@ -1,0 +1,137 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+background: #0a0a0a;
+color: #e0e0e0;
+font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+display: flex;
+height: 100vh;
+overflow: hidden;
+}
+
+/* Sidebar */
+#sidebar {
+width: 320px;
+min-width: 320px;
+background: #111;
+border-right: 1px solid #222;
+padding: 18px;
+overflow-y: auto;
+}
+#sidebar h1 {
+font-size: 15px;
+margin-bottom: 14px;
+font-weight: 600;
+letter-spacing: 0.5px;
+}
+#sidebar label {
+display: block;
+font-size: 10px;
+margin-top: 12px;
+margin-bottom: 4px;
+color: #999;
+text-transform: uppercase;
+}
+#sidebar input, #sidebar select, #sidebar button {
+width: 100%;
+background: #1a1a1a;
+color: #e0e0e0;
+border: 1px solid #333;
+border-radius: 4px;
+padding: 5px 7px;
+font-size: 12px;
+font-family: 'Consolas', 'Monaco', monospace;
+}
+#sidebar input:focus, #sidebar select:focus, #sidebar button:focus {
+outline: none;
+border-color: #4a9eff;
+}
+#sidebar select { cursor: pointer; }
+#sidebar button {
+margin-top: 8px;
+background: #222;
+cursor: pointer;
+}
+#sidebar button:hover { background: #2a2a2a; }
+#sidebar hr {
+border: none;
+border-top: 1px solid #222;
+margin: 14px 0;
+}
+.row3 {
+display: flex;
+gap: 6px;
+}
+.row3 input { flex: 1; }
+.row3 .ax {
+align-self: center;
+font-size: 11px;
+color: #888;
+width: 14px;
+text-align: center;
+}
+#error {
+color: #ff5555;
+font-size: 11px;
+margin-top: 6px;
+min-height: 14px;
+font-family: 'Consolas', 'Monaco', monospace;
+}
+.hint {
+color: #777;
+font-size: 11px;
+}
+
+/* Main area */
+#main {
+flex: 1;
+display: flex;
+flex-direction: column;
+align-items: center;
+justify-content: center;
+position: relative;
+background: #050505;
+}
+#viewbox {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+#viewport {
+position: relative;
+border: 1px solid #333;
+box-shadow: 0 0 20px rgba(0,0,0,0.8);
+width: 560px;
+height: 560px;
+flex-shrink: 0;
+}
+#glcanvas {
+position: absolute;
+top: 24px;
+left: 24px;
+}
+#overlay {
+position: absolute;
+top: 0; left: 0;
+pointer-events: none;
+}
+#colorbar-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 201px;
+}
+#colorbar {
+  width: 20px;
+  height: 201px;
+  border: 1px solid #666;
+}
+#colorbar-labels {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: 201px;
+  font-family: 'Consolas', monospace;
+  font-size: 11px;
+  color: #aaa;
+}

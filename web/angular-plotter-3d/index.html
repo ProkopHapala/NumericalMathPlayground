@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Angular Function Plotter</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="sidebar">
+<h1>Angular Function Plotter</h1>
+
+<label for="preset">Preset</label>
+<select id="preset">
+<option value="custom">Custom</option>
+<option value="-z*z">sp1 Linear (-z²)</option>
+<option value="-(x*x*x - 3.0*x*y*y)">sp2 Trigonal (-(x³ - 3xy²))</option>
+<option value="-x*y*z">sp3 Tetrahedral (-xyz)</option>
+<option value="x*x*x*x + y*y*y*y + z*z*z*z">Octahedral (x⁴+y⁴+z⁴)</option>
+<option value="x*y">Quadrupole (xy)</option>
+<option value="z">Dipole (z)</option>
+<option value="1.0/(1.0+x*x+y*y+z*z)">Lorentz (1/(1+r²))</option>
+<option value="exp(-(x*x+y*y+z*z))">Gaussian (exp(-r²))</option>
+<option value="x*x*x - 3.0*x*y*y|(3.0*x*x*y - y*y*y)*z">sp2 complex Re|Im</option>
+<option value="x*x - y*y|y*y - z*z">sp3 x²-y² | y²-z² (cube diag, all 8)</option>
+<option value="(x*x-y*y)*x*y*z|(y*y-z*z)*x*y*z">sp3 (x²-y²)·xyz | (y²-z²)·xyz</option>
+<option value="(x+y)*(y+z)*(z+x)|(x-y)*(y-z)*(z-x)">sp3 P+ | P− (plane products)</option>
+<option value="(x*x-y*y)*(x*x-y*y) + (y*y-z*z)*(y*y-z*z) + (z*z-x*x)*(z*z-x*x)">sp3 sym quartic |F|² (isosurf/volMinMax)</option>
+<option value="x*x - y*y|y*y - z*z|max(x*y*z,0.0)">sp3 chiral: x²-y²|y²-z²|W=xyz⁺</option>
+</select>
+
+<label for="expr">Expression <span class="hint">(x, y, z) — single func</span></label>
+<input type="text" id="expr" value="-x*y*z" spellcheck="false">
+
+<label for="exprR">Re(x,y,z) <span class="hint">for filament/zeroplanes</span></label>
+<input type="text" id="exprR" value="x*x*x - 3.0*x*y*y" spellcheck="false">
+
+<label for="exprI">Im(x,y,z)</label>
+<input type="text" id="exprI" value="(3.0*x*x*y - y*y*y)*z" spellcheck="false">
+
+<label for="exprW">Envelope W <span class="hint">(multiplies filament/zeroplanes alpha; 1.0 = off)</span></label>
+<input type="text" id="exprW" value="1.0" spellcheck="false">
+
+<div id="error"></div>
+
+<hr>
+
+<label>Plane size <span class="hint" id="val-planeSize">2.0</span></label>
+<input type="range" id="planeSize" min="0.1" max="5.0" step="0.1" value="2.0">
+
+<label>Color scale <span class="hint" id="val-colorScale">1.0</span></label>
+<input type="range" id="colorScale" min="0.1" max="5.0" step="0.1" value="1.0">
+
+<label>Colormap</label>
+<select id="colormap">
+<option value="seismic">Diverging (seismic)</option>
+<option value="heat">Heat</option>
+<option value="viridis">Viridis</option>
+<option value="coolwarm">Coolwarm</option>
+</select>
+
+<hr>
+
+<label for="renderMode">Render mode</label>
+<select id="renderMode">
+<option value="slice">2D Slice</option>
+<option value="volumeMinMax">Volume Min/Max</option>
+<option value="isosurface">Isosurface</option>
+<option value="filament">Filament (max 1/|Re|+|Im|)</option>
+<option value="filamentChiral">Filament chiral (red=tet, blue=anti)</option>
+<option value="zeroplanes">Zero planes (Re red, Im blue)</option>
+</select>
+
+<label>Volume steps <span class="hint" id="val-steps">100</span></label>
+<input type="range" id="steps" min="10" max="300" step="10" value="100">
+
+<label>Isovalue <span class="hint" id="val-isoval">0.50</span></label>
+<input type="range" id="isoval" min="-2.0" max="2.0" step="0.05" value="0.5">
+
+<hr>
+
+<label>Cut origin</label>
+<div class="row3">
+<span class="ax">X</span><input type="number" id="ox" value="0" step="0.1">
+<span class="ax">Y</span><input type="number" id="oy" value="0" step="0.1">
+<span class="ax">Z</span><input type="number" id="oz" value="0" step="0.1">
+</div>
+
+<button id="resetNormal">Reset camera rotation</button>
+
+<label>Plane shift <span class="hint" id="val-shift">0.0</span></label>
+<input type="range" id="shift" min="-2.0" max="2.0" step="0.05" value="0.0">
+
+<hr>
+<div class="checkrow"><input type="checkbox" id="showAxes" checked><label for="showAxes" class="inline">Show 3D axes</label></div>
+<div class="checkrow"><input type="checkbox" id="autoUpdate" checked><label for="autoUpdate" class="inline">Auto-update on drag</label></div>
+<button id="btnUpdate">Update viewport</button>
+<div class="hint" style="margin-top:8px">Drag: trackball rotate · Scroll: zoom color</div>
+</div>
+
+<div id="main">
+<div id="viewbox">
+  <div id="viewport">
+    <canvas id="glcanvas" width="512" height="512"></canvas>
+    <canvas id="overlay" width="512" height="512"></canvas>
+  </div>
+  <div id="colorbar-container">
+    <canvas id="colorbar" width="60" height="200"></canvas>
+    <div id="colorbar-labels">
+      <span id="cmax">+1.00</span>
+      <span id="cmin">-1.00</span>
+    </div>
+  </div>
+</div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
