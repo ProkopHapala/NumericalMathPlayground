@@ -637,3 +637,83 @@ $$x_{i+1} = x_i + \gamma_i v_{i+1}$$
 This is still just a "sum of a series," exactly like your geometric series idea. The threads on your GPU do nothing but local matrix-vector multiplies and vector additions. But because the weights $\gamma_i$ and the recurrence relation mimic a standing wave rather than a runaway exponential, the errors interfere destructively and cancel out.
 
 It allows you to solve the linear system for frequencies directly inside the molecular spectrum without ever needing a single global GPU synchronization.
+
+---
+
+# USER
+
+OK, this is good, just No I'm thinking about the plotting the eigenvalue It is good we have the residual and iteration plot, but the resiual plot should be done the same way as iteration plot, just on y-axis we have the resiudal instead of iteration but we still see how gradually the eigenvalue converge to the exact solution, modify that resiaul plot
+
+now several questions
+1) if we compute residaul cannot we use it directly to improve the convergence somehow? I was thinking to simpley subtract it from the eigenvectro, but that would prehas not worul we would ned to invert it back and that woud be costly right?
+
+2) for the ritz convergence I can see that the values on the edges of spectrum converge slowly? Is that some feature? For lanczost it is typically oposite right?
+
+3) the Ritz iteration have some fixed number of vectros in each interfval but sometimes this is wrong number. If it is wrong number we have some parasitic vectro which does not converge to anything, and maybe it breaks the convergence of other as it fight with neighboring peak for the same eigenvecro (?). Can we somehow prune it? e.g. after few iteraction we find those vectros which have large residual and we remove them and continue with smaller matrix? or we can somehow estimate the rank an to QR on smallre matrix? (but something cheap) this is problably some idea already discussed in letarature and used?
+
+4) For lanczos we got very bad results ! why? Also the number of Lancozs vectros in each bin (sub-interval) is very different than it should be
+
+3) I do not see anywhere plot of the Jacobi spectral envelope, can you recompute it and tell me exactly name of the file where it is ploted?
+
+
+---
+
+# Kimi 2.6
+
+## 5) Jacobi spectral envelope
+**File:** [/tmp/jacobi_spectral_envelope.png](cci:7://file:///tmp/jacobi_spectral_envelope.png:0:0-0:0) — computed with the main mode (`--fine_iters 30`). The top panel shows the normalized `1/‖(fI−H)^n V_band‖` peaks at eigenvalues; bottom panel shows per-vector responses.
+
+## 1) Can residual improve convergence?
+
+**Yes**, this is exactly **Rayleigh Quotient Iteration (RQI)**:
+```python
+# Given (λ, u) with residual r = H u - λ u
+# Solve: (H - λ I) δu = -r   →   u_new = u + δu
+```
+This converges **cubically** once close. The problem: it requires solving with `(H - λI)`, which for large matrices means an **expensive iterative linear solve** (e.g. CG, MINRES). That's why we use the cheaper **polynomial filter** `p(H)` instead — it's a matrix-free preconditioner that avoids any solve.
+
+The residual *is* useful for **pruning** (see below), but using it for active correction needs a solve.
+
+## 2) Ritz edges converge slowly — Lanczos is opposite
+
+**Yes, this is expected.**
+
+| Method | Converges fastest at |
+|--------|---------------------|
+| **Subspace iteration (Ritz)** | Interior of bands (large spectral gap) |
+| **Lanczos** | Extremes of spectrum |
+
+For subspace iteration, convergence rate ≈ `(|λ_outside| / |λ_inside|)^k`. At the **edges** of the spectrum, the gap to the nearest outside eigenvalue is small → slow convergence. At the **center**, the gap is large → fast convergence.
+
+Lanczos is the mirror image: its Krylov polynomials naturally amplify extreme eigenvalues. For interior bands, Lanczos is the wrong tool without shift-invert.
+
+## 3) Pruning parasitic vectors
+
+**Yes — added `--prune_tol`.** Run:
+```bash
+python chebyshev_prefiltered_jacobi_ocl.py --converge_spectrum --prune_tol 1e-2 ...
+```
+
+After iteration 2, vectors with residual > `prune_tol` are **dropped** and the subspace shrinks. This is **locking/deflation** (used in FEAST, ARPACK). Benefits:
+- Parasitic vectors stop fighting with real ones
+- QR on smaller matrix is cheaper
+- Convergence accelerates because power goes to fewer true eigenvectors
+
+You can also do a **cheap rank estimate**: after the first [apply_cheb_poly](cci:1://file:///home/prokop/git/NumericalMathPlayground/topics/SpectralFiltering/chebyshev_prefiltered_jacobi_ocl.py:156:0-168:12), compute column norms of `V_band`. Very small norms ≈ no eigenvector in that direction → drop those columns before QR.
+
+## 4) Why Lanczos gives bad results
+
+**Fundamental mismatch:** single-vector Lanczos on the **full matrix H** converges to the **extreme eigenvalues** of H (smallest/largest), not to eigenvalues inside an arbitrary band.
+
+The starting vector `V_band` only affects **speed**, not **target**: in exact arithmetic, Lanczos on H eventually spans the whole spectrum. So it ignores your band boundaries and finds λ_min or λ_max instead.
+
+To target an interior band with Lanczos you need:
+- **Shift-invert**: `(H - σI)^{-1}v` — expensive solves
+- **Filtered Lanczos** (FEAST): apply filter, then Lanczos on the filtered subspace — but this is essentially what the **Ritz** method already does (and Ritz is cheaper because it uses the full block `V` simultaneously)
+
+**Bottom line:** for your use case (find ALL eigenvalues in many interior bands), **Ritz subspace iteration is the correct cheap method.** Lanczos is designed for a few extreme eigenvalues.
+
+## Residual plot updated
+The bottom panel now shows **residual trajectories** the same way as the top panel: x=eigenvalue, y=residual (log scale), with lines connecting iterations, color-coded by band. You can see residuals dropping as eigenvalues converge to the red dashed exact values.
+
+**File:** [/tmp/ritz_traj_residual.png](cci:7://file:///tmp/ritz_traj_residual.png:0:0-0:0)
