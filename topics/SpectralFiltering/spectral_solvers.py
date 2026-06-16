@@ -21,6 +21,25 @@ try:
 except ImportError:
     _HAS_OPENCL = False
 
+
+def _auto_cl_context():
+    """Auto-select NVIDIA GPU if available, else first GPU, else CPU. No prompts."""
+    if not _HAS_OPENCL:
+        raise RuntimeError("pyopencl not installed")
+    for platform in cl.get_platforms():
+        for device in platform.get_devices():
+            if device.type & cl.device_type.GPU and "NVIDIA" in device.vendor.upper():
+                return cl.Context([device])
+    for platform in cl.get_platforms():
+        for device in platform.get_devices():
+            if device.type & cl.device_type.GPU:
+                return cl.Context([device])
+    for platform in cl.get_platforms():
+        for device in platform.get_devices():
+            if device.type & cl.device_type.CPU:
+                return cl.Context([device])
+    raise RuntimeError("No OpenCL device found")
+
 DEFAULT_FIXTURES_DIR = os.environ.get(
     "VIBRATION_BENCHMARKS_DIR",
     "/home/prokop/git/FireCore/tests/tSiNCs/fixtures/vibration_benchmarks",
@@ -146,7 +165,7 @@ class OpenCLCSRSpMM:
         self.indptr = K_csr.indptr.astype(np.int32)
         self.indices = K_csr.indices.astype(np.int32)
         self.data = K_csr.data.astype(np.float64)
-        self.ctx = cl.create_some_context()
+        self.ctx = _auto_cl_context()
         self.queue = cl.CommandQueue(self.ctx)
         self.prg = cl.Program(self.ctx, _OPENCL_CSR_SPMM).build()
         self._bufs = None
