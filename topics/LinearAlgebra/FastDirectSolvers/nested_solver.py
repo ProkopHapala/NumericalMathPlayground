@@ -1,10 +1,57 @@
 """
 Nested dissection + block diagonalization solver for vibration benchmarks.
 
-- Geometric recursive bisection of atoms into clusters
-- Reorder DOFs by cluster -> bordered block-diagonal form
-- Extract and diagonalize blocks independently (Python + OpenCL Jacobi)
-- Compare approximate spectrum to exact numpy eigh
+Goal: approximate the low-frequency vibrational spectrum of large sparse
+matrices (stiffness K, mass M) without full O(N^3) diagonalization.
+The matrix H = M^{-1/2} K M^{-1/2} is reordered into a block structure
+so that each block can be diagonalized independently, then coupling
+between blocks is recovered via Ritz correction.
+
+Methods implemented:
+1. Recursive Coordinate Bisection (RCB):
+   Geometric clustering of atoms by recursively splitting along the
+   longest bounding-box axis. Produces spatially compact clusters.
+
+2. Nested Dissection (ND):
+   Recursive geometric bisection that introduces separator strips
+   (middle 20% along the split axis) between two halves. The separator
+   is processed last, yielding a bordered block-diagonal form with
+   fill-in confined to separator rows/columns.
+
+3. Block diagonalization:
+   Each diagonal block is diagonalized independently — either by
+   numpy.eigh (CPU reference) or by batched cyclic Jacobi on GPU
+   (OpenCLBlockJacobi). Blocks are small (3*n_atoms_per_cluster),
+   so this is cheap.
+
+4. Ritz correction (two-level):
+   After block diagonalization, the full H is projected onto the
+   block-eigenvector basis V (block-diagonal). The reduced matrix
+   H_proj = V^T H V captures inter-block coupling. Diagonalizing
+   H_proj gives corrected eigenvalues. Optionally, only the lowest
+   n_modes_per_block eigenvectors are kept (truncated Ritz) for
+   a reduced model. The similarity transform V^T H V can be done
+   on GPU via tiled GEMM kernels.
+
+5. Recursive exact AMLS (Automated Multi-Level Substructuring):
+   Bottom-up exact solver: diagonalize leaf blocks, transform
+   separator matrices into leaf-eigenbasis, then diagonalize the
+   reduced separator. Recurses up the tree. Exact up to round-off.
+
+6. Static condensation (Guyan reduction at omega=0):
+   Eliminates interior DOFs by Schur complement: S = H_ss - H_is^T
+   H_ii^{-1} H_is. Gives approximate separator eigenvalues.
+
+7. RCM (Reverse Cuthill-McKee) reordering:
+   Bandwidth-reducing permutation for comparison.
+
+GPU kernels (embedded as OpenCL C strings):
+- block_jacobi: batched cyclic Jacobi, one workgroup per block,
+  single-threaded per block, local memory storage.
+- block_jacobi_padded: parallel version, one thread per row,
+  supports varying block sizes via padding.
+- gemm_tall_skinny: tiled C = A^T @ B for [K,N] x [K,m] -> [N,m].
+- gemm_skinny_transpose: tiled C = A^T @ B for [N,m] x [N,m] -> [m,m].
 """
 
 from __future__ import annotations

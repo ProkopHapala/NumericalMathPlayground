@@ -1,3 +1,8 @@
+"""
+spectral_demos-external.py — Demo script for spectral filtering with external matrix input.
+Loads vibration benchmark matrices from external files and runs iterative solvers
+(Chebyshev-filtered, Jacobi, CG) with visualization of spectral density.
+"""
 import os
 import time
 import numpy as np

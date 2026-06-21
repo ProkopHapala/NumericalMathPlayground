@@ -1,6 +1,22 @@
 """
 Test GPU-accelerated Ritz correction against CPU reference.
 
+Ritz correction is the key step that recovers inter-block coupling after
+block-diagonal approximation (see nested_solver.py for theory). It computes:
+    H_proj = V^T H V
+where V is the block-diagonal eigenvector matrix, then diagonalizes H_proj.
+
+This test compares the GPU path (similarity transform via tiled GEMM kernels
+on OpenCL) against the CPU path (numpy matmul) for the nanocrystal benchmark
+"nc_C_R5". It checks:
+- Eigenvalue accuracy (relative error < 1e-4)
+- Eigenvector subspace overlap via SVD (robust to sign/degeneracy)
+- Residual norms ||H v - lambda v||
+- Comparison against exact numpy.eigh reference for lowest modes
+
+Both RCB and nested dissection reorderings are tested with varying
+n_modes_per_block (8, 16, 32) to assess truncation quality.
+
 Usage:
     python test_gpu_ritz.py
 """

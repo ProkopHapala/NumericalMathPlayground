@@ -1,3 +1,8 @@
+/**
+angular-plotter-3d/app.js — WebGL2-based 3D angular function plotter.
+Renders 3D surface visualizations of spherical harmonics / angular functions
+with interactive camera controls and real-time shader-based rendering.
+*/
 const canvas = document.getElementById('glcanvas');
 const gl = canvas.getContext('webgl2');
 if (!gl) {

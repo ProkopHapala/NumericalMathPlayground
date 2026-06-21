@@ -1,6 +1,22 @@
 """
 Test GPU GEMM kernels (tall-skinny and skinny-transpose) against NumPy reference.
 
+These two GEMM kernels are the building blocks of the GPU similarity transform
+H_proj = V^T H V used in Ritz correction (see nested_solver.py). They are
+specialized for the shapes that arise in block-diagonal solvers:
+
+1. Tall-skinny GEMM: C = A^T @ B
+   A is [K, N] (large, square-ish), B is [K, m] (tall-skinny, m << K).
+   Output C is [N, m]. Used for the first step: temp = H @ V.
+
+2. Skinny-transpose GEMM: C = A^T @ B
+   A and B are both [N, m] (tall-skinny). Output C is [m, m] (small square).
+   Used for the second step: H_proj = V^T @ temp.
+
+Both kernels use 2D tiled local-memory GEMM for GPU efficiency.
+This script verifies numerical correctness (float32) against NumPy double
+precision for various N, K, m combinations.
+
 Usage:
     python test_gpu_gemm.py
 """

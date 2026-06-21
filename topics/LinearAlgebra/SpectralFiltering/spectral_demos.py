@@ -1,3 +1,8 @@
+"""
+spectral_demos.py — Demo script for spectral filtering on toy and benchmark matrices.
+Showcases Chebyshev-filtered subspace iteration, resolvent probing, and spectral
+density estimation with built-in test matrices and visualization.
+"""
 import numpy as np
 import argparse
 

@@ -1,3 +1,8 @@
+/**
+angular-plotter/app.js — WebGL2-based interactive angular function plotter.
+Renders real-time spherical harmonic / angular function visualizations with
+mouse controls for rotation and zoom.
+*/
 const canvas = document.getElementById('glcanvas');
 const gl = canvas.getContext('webgl2');
 if (!gl) {

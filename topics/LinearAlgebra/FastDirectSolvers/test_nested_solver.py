@@ -1,12 +1,31 @@
 """
 Test nested dissection + block diagonalization on nanocrystal benchmarks.
 
-Runs:
-  1. Exact numpy eigh (reference)
-  2. Geometric clustering (RCB) -> block-diagonal approximation
-  3. Nested dissection -> bordered block-diagonal
-  4. Block diagonalization via Python Jacobi and OpenCL batched Jacobi
-  5. Spectrum comparison plots
+This is the main integration test for the FastDirectSolvers module. It loads
+a vibration benchmark (stiffness K, mass M from nanocrystal MD simulations),
+builds the mass-weighted Hamiltonian H = M^{-1/2} K M^{-1/2}, and compares
+multiple spectral approximation strategies against exact diagonalization.
+
+Pipeline:
+1. Load benchmark system (adamantane, nc_C_R4..R8 nanocrystals).
+2. Exact numpy.eigh — reference spectrum (O(N^3)).
+3. RCB clustering -> block-diagonal approximation:
+   Geometric recursive coordinate bisection groups atoms into spatial
+   clusters. Each cluster's local DOFs form a diagonal block. Off-diagonal
+   blocks are discarded. Each block is diagonalized independently.
+4. Nested dissection -> bordered block-diagonal:
+   Like RCB but introduces separator strips between halves. Separators
+   are processed last, concentrating fill-in into a small border.
+5. Block diagonalization methods:
+   - Python numpy.eigh (reference)
+   - Cyclic Jacobi (Python, for validation)
+   - OpenCL batched Jacobi (GPU, with --gpu flag)
+6. Ritz correction: project full H onto block-eigenvector basis to recover
+   inter-block coupling. Optionally truncated (n_modes_per_block).
+7. Recursive exact AMLS: bottom-up exact solver via the ND tree.
+8. Static condensation (Guyan reduction): Schur complement at omega=0.
+9. Spectrum comparison plots: eigenvalue errors, mode shapes, matrix
+   sparsity patterns with block boundaries.
 
 Usage:
     python test_nested_solver.py --system nc_C_R5 --n_clusters 8
