@@ -2990,3 +2990,320 @@ __kernel void compute_scalar_overlaps(
     The kernel outputs the raw errors $\Omega_{ij} - \delta_{ij}$. The Update kernel will simply load these scalars:
     `float err = Out_Overlaps[neigh_idx];`
     instead of recomputing them or loading from a placeholder.
+
+---
+
+# USER
+
+
+Now lets focus on linear scalling 
+/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM
+
+Can you clearly describe the algorithm?
+
+I know:
+1) we enforce localization by some potential and by cutting what leaks out
+2) we compute overlpa and penalty for overlpa
+3) do wedo exact orthogonalization for the localized functions? Maybe it is not possible ?
+
+---
+
+# GLM-5.2
+
+Let me explore the OMM codebase to understand the algorithm.
+
+
+
+Let me also check the FIRE version and the OpenCL kernels for additional algorithmic details.
+
+Here's a clear description of the OMM algorithm as implemented in your codebase:
+
+---
+
+# OMM Algorithm Description
+
+## Goal
+
+Minimize the energy functional **E = Σᵢ ⟨φᵢ|H|φᵢ⟩** subject to orthonormality constraints **⟨φᵢ|φⱼ⟩ = δᵢⱼ**, while keeping each orbital **φᵢ** strictly confined to a **finite spatial support** (a mask/window of grid points). This is what makes it **O(N)** scaling — each orbital only interacts with neighbors whose supports overlap.
+
+## The Three Pillars
+
+### 1. Localization via Finite Support (Truncation)
+
+Each orbital lives on a **fixed mask** — a contiguous window of grid points. Anything outside the mask is **hard-zeroed**.
+
+- [OMM_1D_grid.py](cci:7://file:///home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM_1D_grid.py:0:0-0:0): masks are contiguous index ranges, e.g. `np.arange(c - support_size//2, c + support_size//2)` (`@/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM_1D_grid.py:41`)
+- [OMM.py](cci:7://file:///home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM.py:0:0-0:0): masks are sets of atom indices within `support_cells` distance (`@/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM.py:27-50`)
+- **Recentering**: after each step, the support window is shifted to track the center-of-mass of |φ|², and anything leaking outside the new window is cut off ([recenter_supports](cci:1://file:///home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM_1D_grid.py:49:4-75:36) at `@/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM_1D_grid.py:50-76`)
+
+There is **no soft confinement potential** in the current code — localization is enforced purely by **hard truncation** (zeroing outside the mask). The harmonic well `V` in the Hamiltonian is the physical potential, not a confinement penalty.
+
+### 2. Energy Minimization (Gradient Descent / FIRE)
+
+The energy gradient for orbital *i* is **∇Eᵢ = 2·H·φᵢ** (or the residual force **F = -(Hφ - εφ)** in the FIRE version, where ε = ⟨φ|H|φ⟩ is the Rayleigh quotient, making the force tangent to the unit sphere).
+
+- Plain gradient descent: `φᵢ -= step_size · grad` within the mask (`@/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM_1D_grid.py:105-113`)
+- FIRE version: adaptively adjusts timestep and mixing based on force-velocity alignment (`@/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM_1D_grid_FIRE.py:11-51`)
+
+### 3. Orthogonalization — **Iterative (not exact)**
+
+This directly answers your key question: **No, exact orthogonalization is not done.** The code uses **iterative Jacobi-style projective sweeps** to push orbitals toward orthogonality.
+
+The method ([orthogonalize](cci:1://file:///home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM_1D_grid.py:77:4-102:44) at `@/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM_1D_grid.py:78-103`):
+
+```
+for each iteration (n_iter times):
+    for each orbital i:
+        correction = Σ_{j≠i} ⟨φᵢ|φⱼ⟩ · φⱼ    (only on the overlapping region)
+        φᵢ -= damping · correction
+        φᵢ /= ||φᵢ||    (normalize)
+```
+
+This is a **damped Gauss-Seidel projection** — each orbital is pushed away from its neighbors proportional to their overlap, then renormalized. It's iterative because:
+
+- **Exact orthogonalization is impossible with fixed supports.** A single Löwdin or Gram-Schmidt step would generally produce orbitals that **leak outside their masks** — the orthogonalized combination of two localized functions is typically more delocalized than either input. You'd have to either (a) expand supports (losing O(N)), or (b) re-truncate after exact orthogonalization (which breaks exactness again).
+- So instead, the code does **many small damped steps**, each of which stays within the support, gradually reducing overlap. The `damping` parameter (typically 0.3–0.5) controls how aggressive each step is.
+
+The [OMM.py](cci:7://file:///home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM.py:0:0-0:0) version (`@/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM.py:226-299`) is more sophisticated — it uses a **Jacobi update with inertia** and step-size capping, solving a local 1D optimization for each coefficient:
+
+```
+delta = damping · b / (a + inertia)
+```
+
+where `b` is the overlap-error gradient and `a` is the curvature, with `max_step` clamping.
+
+The FIRE version adds **momentum mixing** (`bmix`) to accelerate convergence of the orthogonalizer (`@/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM_1D_grid_FIRE.py:167-206`).
+
+## Full Iteration Loop
+
+```
+for each outer iteration:
+    1. Energy step:      φᵢ -= dt · ∇Eᵢ        (gradient descent or FIRE)
+    2. Orthogonalize:    iterative projective sweeps (damped Jacobi)
+    3. Recenter:         shift masks to track φ center-of-mass, truncate
+```
+
+## GPU 3-Phase Gradient ([OMM.cl](cci:7://file:///home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/cl/OMM.cl:0:0-0:0))
+
+On GPU, the gradient computation (which includes the orthogonality penalty) is split into 3 kernels to avoid atomic operations:
+
+1. **`apply_operator`**: compute `H|φᵢ⟩` and `S|φᵢ⟩` on expanded supports (`@/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/cl/OMM.cl:19-65`)
+2. **`project_orbitals`**: compute scalar overlaps `⟨φᵢ|H|φⱼ⟩` and `⟨φᵢ|S|φⱼ⟩` (`@/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/cl/OMM.cl:71-135`)
+3. **`assemble_gradient`**: combine into `gᵢ = H|φᵢ⟩ - Σⱼ λᵢⱼ · S|φⱼ⟩` (`@/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/cl/OMM.cl:141-216`)
+
+## Summary of Your Three Questions
+
+1. **Localization enforcement**: Hard truncation (zeroing outside mask) + periodic recentering. No soft confinement potential in the current code.
+2. **Overlap penalty**: Computed as `⟨φᵢ|φⱼ⟩` for neighboring orbitals (those whose masks intersect). Used to drive the projective correction, not as an additive energy penalty.
+3. **Exact orthogonalization**: **Not done, and not possible** with fixed finite supports. The orthogonalized result would leak outside the mask. Instead, iterative damped Jacobi projections are used, which stay within supports but only asymptotically achieve orthogonality.
+
+---
+
+# USER
+
+Good. Now I'm thinkuing how to introduce the orthogonality constrains better. I know we cannot do exact Gram-Shmid or QR orthogonaliation as it would break finite support. But still we can enforce this orthogonality better. Consider that we have now some non-orthogonality penalty which is basically stiffnes constant K scaling the square of overlap, right? Form that energy expression we compute orthogonalization forces. But these orthogonalization forces cannot be too high, otherwise our relaxation time step would break. But we can consider it as constrained minimization probrel where we solve fullfilement of these constrain by some fast linear solver. Which is also having sparse matrix. Right? Or we already do this?
+
+---
+
+# GLM-5.2
+
+You're asking a good question. Let me clarify what the code does now vs. what you're proposing.
+
+## What the code does now
+
+The current orthogonalization is a **damped fixed-point iteration** — essentially a penalty method with manual damping:
+
+```
+correction_i = Σ_{j≠i} ⟨φᵢ|φⱼ⟩ · φⱼ
+φᵢ -= damping · correction_i
+```
+
+The "force" is proportional to the constraint violation (overlap), and `damping` plays the role of 1/K (inverse stiffness). If damping is too high → overshoot and instability. If too low → slow convergence. This is the fundamental tradeoff you identified.
+
+## What you're proposing: solve the linear system directly
+
+Yes, this is the right idea, and **no, the code does not currently do this**. Here's the math:
+
+### Projected gradient on the constraint manifold
+
+After computing the energy gradient `gᵢ = 2H|φᵢ⟩`, you want to project it onto the tangent space of the orthonormality constraint surface. The projected gradient is:
+
+```
+gᵢ^⊥ = gᵢ - Σⱼ λᵢⱼ · φⱼ
+```
+
+The λᵢⱼ are determined by requiring that `gᵢ^⊥` is tangent to the constraint — i.e., orthogonal to all existing orbitals:
+
+```
+⟨gᵢ^⊥ | φₖ⟩ = 0   for all k
+→  ⟨gᵢ | φₖ⟩ - Σⱼ λᵢⱼ ⟨φⱼ | φₖ⟩ = 0
+→  Σⱼ λᵢⱼ · Sⱼₖ = Gᵢₖ
+```
+
+where **Sⱼₖ = ⟨φⱼ|φₖ⟩** (orbital overlap matrix) and **Gᵢₖ = ⟨gᵢ|φₖ⟩** (gradient projected onto orbitals).
+
+This is a **linear system**: **S · λ = G**, where:
+- **S is sparse** — only nonzero for orbital pairs whose supports overlap (neighbor pairs)
+- **S is symmetric** — Sⱼₖ = Sₖⱼ
+- Size is N_orb × N_orb (not N_grid × N_grid), so it's small
+- Can be solved with sparse CG, sparse Cholesky, or even dense for small systems
+
+### Why this is better
+
+- **No damping parameter** — the projection is exact, not approximate
+- **No stiffness/step-size tradeoff** — the constraint is satisfied to machine precision each step, regardless of energy step size
+- **The linear solve is cheap** — S is sparse and small (only neighbor pairs), so each row has ~2×support_cells entries
+- **O(N) scaling preserved** — the sparse structure means the solve is local
+
+### Why the current code doesn't do this
+
+Likely simplicity — the damped Jacobi is trivial to implement and works "well enough" for prototyping. On GPU, a sparse linear solve is more complex than element-wise kernel updates. But on CPU (and even on GPU with iterative methods like CG), it's very feasible.
+
+### Connection to what the GPU code almost does
+
+The GPU `assemble_gradient` kernel already computes `gᵢ = H|φᵢ⟩ - Σⱼ λᵢⱼ·S|φⱼ⟩` — but it uses **λᵢⱼ = ⟨φᵢ|S|φⱼ⟩** (the raw overlap), not the solution of the linear system. So it's doing a **penalty** step, not a **projection** step. The infrastructure (sparse pairs, overlaps) is already there — you'd just need to replace the direct λ assignment with a linear solve.
+
+### What to implement
+
+The minimal change would be:
+
+1. Compute the orbital overlap matrix S_orb (sparse, neighbor pairs only) — **already computed** in the code
+2. Compute G_ik = ⟨gᵢ|φₖ⟩ for each neighbor pair
+3. Solve S_orb · λ = G (sparse CG or direct)
+4. Use the projected gradient gᵢ^⊥ = gᵢ - Σⱼ λᵢⱼ·φⱼ for the update step
+5. After the update, do a quick normalization (the projection keeps you on the tangent plane, but the finite step leaves the manifold slightly)
+
+This replaces the entire [orthogonalize()](cci:1://file:///home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM_1D_grid.py:77:4-102:44) function with a single linear solve, and the energy step uses the projected gradient instead of the raw gradient.
+
+Want me to implement this in [OMM_1D_grid.py](cci:7://file:///home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM_1D_grid.py:0:0-0:0) as a prototype?
+
+---
+
+# USER
+
+OK two big questions
+1) how costly would this be, if we consider each orbital has certain maximum extend, and certain number of neighbors (we can estimate number of non-zero elements of the matrixes). 
+2) how to do thse things to avoid "filling problem" or dsnityfication. We prefer sparse-matrix--dense-vector-multiplecation rather than multiply matrixes.
+3) can we use Jacobi rather than CG to solver these matrixes? 
+5) Currently we move the COG of each orbital, which makes some problems. But if we fix the COG possibly we can have some constant overlap matrix which we can cholesky factorize and keep constant?
+
+6) we must distinguis two overlap matrixes and perhaps use different symbol. We have overlap matrix for our basis function (like tight binign H_{mu,nu} for each atomic orbital or site) and then we have overlap matrix for the localized molecular orbitals we are sarchijng, lets distinguish this clearly. H_{mu,nu} and S_{mu,nu} is definitely constant and we can factorize it before iteration. Not sure if that helps. The ovelap for orbitals O_ij=< phi_i | phi_j > is changing during the oprimnization process so it is not possible to factroize it, and it is generally much denser (more filled in).
+
+7) How exactly we do the truncation? We simply delete some element (set them to zero) and then we renormalize what is left? Does it cause some artifacts to the functions? Would it be better if we use some softer localization potential before we apply truncation 
+
+---
+
+# GLM-5.2
+
+Three excellent points. Let me address each.
+
+## 1. Window function + coefficient regularization
+
+You're right about the blow-up problem. If φ = w · c (element-wise), and w → 0 at the boundary, then the energy ⟨φ|H|φ⟩ and norm ⟨φ|φ⟩ become insensitive to c at the boundary. The optimizer can push those c values to ±∞ with zero energy cost.
+
+Your proposed fix is correct: add a **Tikhonov regularization** on raw coefficients:
+
+```
+E_total = Σᵢ ⟨φᵢ|H|φᵢ⟩ + λ_reg · Σᵢ ‖cᵢ‖²
+```
+
+where φᵢ = wᵢ ⊙ cᵢ (window applied element-wise). The gradient becomes:
+
+```
+∂E/∂cᵢ = 2·(wᵢ ⊙ (H·φᵢ)) + 2·λ_reg·cᵢ
+```
+
+At the boundary where w ≈ 0, the energy gradient vanishes but the regularization gradient 2λ_reg·cᵢ pushes c → 0. In the interior where w ≈ 1, the regularization is a small constant shift that doesn't affect the physics. λ_reg should be small enough not to distort the interior (e.g. λ_reg ~ 0.01·ε_min).
+
+Normalization should use the **windowed** norm: ‖φ‖² = Σ w²·c² = 1, not ‖c‖² = 1. This ensures the physical orbital is normalized, not the raw coefficients.
+
+For the window form you suggested, `w = (1 - (r/Rc)²ⁿ)^(2+m)`:
+- The `2n` exponent controls how flat the plateau is (higher n → wider flat region, sharper edge)
+- The `2+m` exponent controls smoothness at the boundary (higher m → more derivatives vanish at Rc)
+- For kinetic energy (2nd derivative), you need at least C² continuity, so m ≥ 1 and n ≥ 1
+- A good default: n=2, m=1 → w = (1 - (r/Rc)⁴)³, which is C⁴ at the boundary
+
+## 2. Avoiding explicit O_{ij} — the key insight
+
+**You're right — we never need to form O_{ij} explicitly.** The CG solve only needs O·v (matvec), and this can be decomposed:
+
+```
+(O·v)_i = Σⱼ ⟨φᵢ|φⱼ⟩·vⱼ = ⟨φᵢ | Σⱼ vⱼ·φⱼ⟩ = ⟨φᵢ | Ψ⟩
+```
+
+where Ψ = Σⱼ vⱼ·φⱼ. For general overlap S:
+
+```
+(O·v)_i = ⟨φᵢ|S|Ψ⟩  where  Ψ = Σⱼ vⱼ·φⱼ
+```
+
+So the matvec is **3 sparse operations**:
+
+1. **Accumulate** Ψ = Σⱼ vⱼ·φⱼ — scatter-add into a dense workspace, each grid point touched only by orbitals whose masks contain it
+2. **Apply S** — compute S·Ψ using the existing `apply_operator` kernel with S as the matrix
+3. **Dot product** — (O·v)_i = ⟨φᵢ|S·Ψ⟩ restricted to Mᵢ, using the existing `project_orbitals` kernel
+
+**This maps exactly onto your existing 3-phase GPU design.** Looking at `@/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/cl/OMM.cl`:
+
+- `apply_operator` (lines 19–65): already computes S|ψ⟩ on expanded supports — **reused as-is for step 2**
+- `project_orbitals` (lines 71–135): already computes ⟨φᵢ|ψ̃ⱼ⟩ — **reused as-is for step 3**
+- Step 1 (accumulate Ψ) is the only new piece — a simple scatter kernel
+
+So the CG loop on GPU would be:
+
+```
+for each CG iteration:
+    1. scatter: Ψ = Σⱼ vⱼ·φⱼ              (new kernel, but trivial)
+    2. apply_operator(S, Ψ) → SΨ            (existing kernel)
+    3. project_orbitals(φᵢ, SΨ) → (O·v)ᵢ   (existing kernel)
+    4. CG update: v, p, r                   (tiny, N_orb-sized)
+```
+
+No O matrix is ever formed. No densification. The memory access pattern is identical to what you already have — sparse supports, neighbor pairs, SLM loads. The CG state vectors (v, r, p) are only N_orb-dimensional, so they live in global memory and are negligible.
+
+Similarly, the right-hand side G_i = ⟨gᵢ|φᵢ⟩ is just one call to `project_orbitals` with gᵢ instead of S·φⱼ.
+
+**This is a major simplification**: the entire projected-gradient approach requires no new kernel infrastructure beyond a scatter-add, just calling existing kernels in a loop.
+
+## 3. Jacobi step size — what the code does vs. optimal
+
+**Current code**: gradient descent on penalty energy E_ortho = ½·Σ_{i≠j} O_{ij}² with **arbitrary** stiffness K=1 and **arbitrary** step size = damping:
+
+```
+force_i = -∂E_ortho/∂φᵢ = -Σⱼ O_{ij}·φⱼ
+φᵢ += damping · force_i
+```
+
+The damping (0.3–0.5) is hand-tuned. Too high → overshoot, oscillation. Too low → slow.
+
+**Optimal Jacobi step** for the linear system (I - O)·φ = 0:
+
+The Jacobi iteration matrix is M = I - O. Its spectral radius ρ(M) = max|1 - λ_k(O)|. For O ≈ I + small off-diagonal, λ_max(O) ≈ 1 + δ where δ = max overlap. Optimal damping:
+
+```
+ω_opt = 2 / (λ_max(O) + λ_min(O)) ≈ 2 / (2 + δ - δ) = 1
+```
+
+So **ω ≈ 1 is near-optimal** when overlaps are small — you could use damping=1.0 instead of 0.5 and get ~2× faster convergence. But this only holds when overlaps are small; early in the optimization when overlaps are large, ω_opt < 1.
+
+**The [OMM.py](cci:7://file:///home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM.py:0:0-0:0) version** (`@/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM.py:226-299`) does something better — a local 1D minimization per coefficient:
+
+```
+δcₖ = damping · b / (a + inertia)
+```
+
+where b = overlap-error gradient, a = local curvature. This is an **approximate optimal step** per coefficient, but it doesn't account for coupling between coefficients within the same orbital or between orbitals.
+
+**CG is the natural upgrade**: it finds the globally optimal step in the Krylov subspace at each iteration, automatically adapting to the eigenvalue spectrum of O. No manual tuning of damping or stiffness. And as shown above, it uses the same SpMV operations you already have.
+
+**Summary of the progression**:
+
+| Method | Step size | Convergence | Tuning needed |
+|--------|-----------|-------------|---------------|
+| Current damped Jacobi | arbitrary damping | ~κ iterations | damping, n_iter |
+| Optimal Jacobi (ω_opt) | 2/(λ_max+λ_min) | ~κ/2 iterations | estimate λ_max |
+| CG | automatic (Krylov-optimal) | ~√κ iterations | none |
+
+where κ = condition number of O ≈ (1+δ)/(1-δ), and δ = max overlap.
+
+Want me to prototype the CG-based projection in [OMM_1D_grid.py](cci:7://file:///home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM_1D_grid.py:0:0-0:0) using the implicit O·v decomposition (accumulate → S·matvec → dot), plus the window function with coefficient regularization?
