@@ -3307,3 +3307,24 @@ where b = overlap-error gradient, a = local curvature. This is an **approximate 
 where κ = condition number of O ≈ (1+δ)/(1-δ), and δ = max overlap.
 
 Want me to prototype the CG-based projection in [OMM_1D_grid.py](cci:7://file:///home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/OMM/OMM_1D_grid.py:0:0-0:0) using the implicit O·v decomposition (accumulate → S·matvec → dot), plus the window function with coefficient regularization?
+
+---
+
+# USER
+
+OK, so now we should apply thios method to more realistic systems.
+
+1) one possibility is the 1D system but with few modifications
+1a) more orbitals in active space (try to increase it gradually and see if there are problems)
+1b) try more complex external potential now it is parabola, we can try some quartic polynominal. Also we can try set some sites localy to different energy (like point defects, for example we have graphene and we indroduce nitrogen defects.)
+1c) we can indroduce disorder in coupling beween neighboring sites (overlpa, and hamiltonian), e.g. by modulation by sine wave - but low frequency like bloch wave.
+
+2) we can consider 2D system, ideally graphene sheet what is the original motivation of these methods. You can try to use this grphne lattice generator from 
+/home/prokophapala/git/NumericalMathPlayground/topics/LinearScalingQM/Kekule_BOP
+
+before you start coding analyse the problem, what can be reused (make notes extact file and function) and what need to be implemented newly. What are the chalanges, how should we test it? Then make plan.
+
+---
+
+# GLM-5.2
+
