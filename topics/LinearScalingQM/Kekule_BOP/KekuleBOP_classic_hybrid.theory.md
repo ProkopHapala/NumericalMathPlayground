@@ -460,6 +460,7 @@ p^{\text{Hückel}}_{ij} = 2 \rho_{ij} .
 - `KekulePure` with `allow_aromatic=True` computes the Pauling bond order when the aromatic term weights all Kekulé structures equally.
 - The valence constraint `Σ_j p_ij = 1` is exactly the Kekulé counting rule.
 - The BOP computes the Hückel bond order (or a local approximation). The classical solver should reproduce Pauling, not Hückel.
+- **Kasteleyn vs. iterative minimization**: Kasteleyn does *not* diagonalize a Hamiltonian. It computes a Pfaffian / determinant of a **signed adjacency matrix** and gives the exact number (or weighted partition function) of Kekulé matchings on a planar graph. To obtain local bond probabilities one also needs `K^{-1}` or ratios of determinants, so the whole procedure is `O(N^3)`. It is a **global counting** method, not a linear solve of our optimization problem. For non-planar graphs or variable `n_i` (b-matching), Kasteleyn does not apply directly, and our iterative solver is the practical alternative.
 - **Cheap improvement**: fit the localization-snap parameters to reproduce known Pauling bond orders for a small set of training molecules.
 
 ---
@@ -649,7 +650,8 @@ Describe spin liquids, high-temperature superconductivity, and strongly correlat
 - Our classical Kekulé ensemble is the **incoherent / classical** limit of an RVB state: we average probabilities rather than amplitudes.
 - The valence sum rule is the RVB hard-core constraint.
 - The resonance entropy is the classical counterpart of RVB entanglement entropy.
-- **Cheap improvement**: if RVB/QMC amplitudes are known for a small system, the exact resonance entropy can be used to calibrate the effective temperature `T` in our free-energy functional.
+- **Small-object / GPU framing**: each dimer covering is a list of local singlet pairs. In a QMC sampler, every GPU thread can propose a local move (e.g., flip a pair of dimers on a plaquette) and compute the acceptance probability from the local energy change. The covering itself is a compact integer/bond list, so memory per configuration is tiny. This is the natural direction for adding quantum corrections to the classical solver without ever building large matrices or molecular orbitals.
+- **Cheap improvement**: start from the `KekulePure` classical minimum, then run a short local-update QMC around it to sample RVB-style quantum fluctuations. The classical seed supplies the energy landscape; the QMC supplies the resonance weights.
 
 ---
 
@@ -667,7 +669,27 @@ A Hamiltonian that acts directly on the Hilbert space of dimer coverings.
 #### Core principles
 
 - **Potential term**: `V_e n_e` assigns an energy to a dimer on edge `e`.
-- **Kinetic term**: flips two parallel dimers around a plaquette.
+- **Kinetic term**: a local dimer flip. On a square plaquette, if two parallel edges are occupied by dimers, the Hamiltonian can replace them by the complementary pair of parallel edges.
+
+#### What the “flip” actually is
+
+It is **not** a spin flip, a phase sign change, or a bond-direction swap. It is a local rewrite of the dimer covering. On a plaquette with vertices `i, j, l, k`:
+
+```
+Before:           After:
+  i —— j           i    j
+                   |    |
+  k —— l           k    l
+
+Dimer edges:      Dimer edges:
+(i,j) and (k,l)  (i,k) and (j,l)
+```
+
+The two parallel dimers on one pair of opposite edges are replaced by the two parallel dimers on the other pair. All four vertices remain singly matched; the hard-core constraint is preserved.
+
+#### Mapping to an Ising-like update
+
+For each plaquette, define a binary variable `σ_p = +1` for one of the two possible dimer configurations and `σ_p = -1` for the other. A dimer flip is exactly a local flip of `σ_p`. The QDM is therefore an Ising-type model on the plaquettes of the dual lattice, with the hard-core constraint enforced by the dimer structure. This is the same structure as the Coulomb/Ising models you have already implemented efficiently on GPU.
 
 #### Derivation / formula
 
@@ -677,10 +699,34 @@ H = \sum_e V_e n_e
 \big( | \text{flip} \rangle \langle \text{flip} | + \text{h.c.} \big) .
 \]
 
+#### Kinetic energy without molecular orbitals
+
+A single dimer covering is **not** an eigenstate of the full Hamiltonian; it is a product of localized singlet bonds. Its energy is therefore not a sum of isolated dimer orbital energies. In VB/QDM, the kinetic energy is represented **off-diagonal in the dimer basis**.
+
+- The Hubbard/Hückel kinetic term `H_t = -t \sum_{\langle i,j \rangle} (c_i^\dagger c_j + \text{h.c.})` moves an electron from one site to a neighbor.
+- Acting on a valence-bond state, this move changes which bonds are occupied: it turns one covering `|C\rangle` into a different covering `|C'\rangle`.
+- The kinetic energy lowering is the **resonance energy** between these two coverings, i.e. the matrix element
+
+\[
+  \langle C' | H_t | C \rangle \approx -t .
+\]
+
+In the QDM, this is exactly the plaquette flip term. The Hamiltonian is a sparse local operator on the graph of dimer coverings: it connects a configuration only to its immediate neighbors in covering space.
+
+For a QMC sampler, the local energy of a covering `C` is
+
+\[
+E(C) = \sum_{e \in C} V_e - t \, N_{\text{flip}}(C) ,
+\]
+
+where `N_{\text{flip}}(C)` is the number of flippable plaquettes in the current covering. The kinetic contribution is therefore a **local count of allowed moves**, not a sum of MO energies. The molecular-orbital delocalization is recovered by sampling many coverings and their superposition, not by diagonalizing a Hamiltonian in the AO basis.
+
+This is the same mechanism in VB theory: the Hamiltonian matrix is built in the non-orthogonal VB basis, and only local bond rearrangements give non-zero matrix elements.
+
 #### Cost / scaling
 
-- Exact diagonalization: exponential in `N`.
-- Quantum Monte Carlo: polynomial for sign-problem-free bipartite / non-frustrated cases.
+- Exact diagonalization in the VB/dimer basis is still exponential in `N`.
+- Quantum Monte Carlo uses the local kinetic estimator above and remains polynomial for sign-problem-free cases.
 - Classical limit (`t → 0`): reduces to enumerating coverings with edge energies `V_e`.
 
 #### Purpose
@@ -709,35 +755,187 @@ Combinatorial methods to count the number of ways to cover a graph with dimers.
 
 #### Core principles
 
-- **Kasteleyn’s theorem**: for a planar graph, the number of perfect matchings equals the Pfaffian of a signed adjacency matrix.
-- The Pfaffian is the square root of a determinant.
-
-#### Derivation / formula
+A **Pfaffian** is a sum over perfect matchings of a graph. For a skew-symmetric matrix `K`, the Pfaffian is defined as
 
 \[
-N_{\text{Kekulé}} = | \text{Pf}(K) | = \sqrt{ | \det(K) | }
+\operatorname{Pf}(K) = \sum_{M} \operatorname{sgn}(M) \prod_{(ij) \in M} K_{ij}
 \]
 
-where `K` is the Kasteleyn-signed skew-symmetric adjacency matrix.
+where the sum runs over all perfect matchings `M`. **Kasteleyn’s theorem** says that for a planar graph, one can assign signs to the edges such that every matching has the same sign. Then the number of perfect matchings is
+
+\[
+N_{\text{Kekulé}} = \operatorname{Pf}(K) = \sqrt{ | \det(K) | } .
+\]
+
+For a **weighted** dimer model, the edge weight `w_{ij}` is put into `K_{ij}` and the partition function is
+
+\[
+Z = \operatorname{Pf}(K) .
+\]
+
+#### Numerical algorithm / pseudocode
+
+1. **Build the Kasteleyn matrix**.
+   - Create an `N × N` skew-symmetric matrix, one row/column per vertex.
+   - For each edge `(i,j)` with weight `w_{ij}`, assign a sign `σ_{ij} ∈ {+1, -1}` according to a Kasteleyn orientation of the planar graph, and set
+     \[
+     K_{ij} = σ_{ij} w_{ij}, \qquad K_{ji} = -σ_{ij} w_{ij}.
+     \]
+   - For an unweighted count, set `w_{ij} = 1`.
+
+2. **Compute the determinant**.
+   - `N_Kekulé = sqrt(|det(K)|)`.
+   - For a weighted partition function: `Z = sqrt(det(K))`.
+
+3. **Compute local dimer probabilities**.
+   - Solve `K x = e_j` for each column `j`, or compute the full inverse `K^{-1}`.
+   - The probability that edge `(i,j)` is occupied is
+     \[
+     p_{ij} = K_{ij} (K^{-1})_{ji}.
+     \]
+   - This is the same information as our optimized `p_ij`, but exact for the planar weighted dimer model.
+
+```python
+def kasteleyn_count(graph, weights=None):
+    N = len(graph.nodes)
+    K = np.zeros((N, N), dtype=float)
+    for (i, j), w in graph.edges(data='weight', default=1.0):
+        s = kasteleyn_sign(i, j, graph)   # planar edge orientation
+        K[i, j] =  s * w
+        K[j, i] = -s * w
+    return np.sqrt(abs(np.linalg.det(K)))
+
+def kasteleyn_probabilities(graph, weights=None):
+    K = build_kasteleyn(graph, weights)   # same as above
+    Kinv = np.linalg.inv(K)               # use sparse solve in production
+    p = {}
+    for (i, j) in graph.edges:
+        p[(i, j)] = K[i, j] * Kinv[j, i]
+    return p
+```
+
+#### Sparse / fast determinant algorithms
+
+- The Kasteleyn matrix is as sparse as the adjacency matrix. For a planar graph, a nested-dissection ordering gives an `O(N^{3/2})` or `O(N \log N)` sparse determinant.
+- Standard sparse LU or LDL^T factorizations can be used; the matrix is skew-symmetric, so a specialized LDL^T saves half the work.
+- For very large planar graphs, fast multipole / H-matrix techniques can push the determinant down to near-linear.
+- For arbitrary non-planar graphs, exact counting is #P-hard; use Monte Carlo or belief propagation instead.
+
+#### From counting to entropy
+
+For the uniform classical dimer model, the entropy is simply
+
+\[
+S = \ln N_{\text{Kekulé}} .
+\]
+
+For the weighted model, the free energy is
+
+\[
+F = -\frac{1}{\beta} \ln Z = -\frac{1}{\beta} \ln \operatorname{Pf}(K) .
+\]
+
+The entropy is then
+
+\[
+S = -\frac{\partial F}{\partial T}
+= \beta \sum_e V_e p_e - \ln Z .
+\]
+
+This gives the exact classical resonance entropy for a given set of edge weights.
+
+#### How to assign Boltzmann weights without diagonalizing a Hamiltonian
+
+The edge weights do not need a full Hückel or CI diagonalization. They can come directly from the **classical energy model** we already have:
+
+\[
+w_{ij} = \exp[-\beta V_{ij}], \qquad
+V_{ij} = -t_{ij} p_{ij} + V_{\text{loc}}(p_{ij}) + \text{QEq/U terms}.
+\]
+
+In other words, `KekulePure` supplies the bond energies, and Kasteleyn tells us how many ways those energies can be satisfied and what the resulting thermal bond probabilities are. The quantum Hamiltonian is replaced by an effective classical energy function on dimer coverings. For quantum corrections beyond this classical energy, use the RVB/QMC sampler described in 7.5 and 7.6.
+
+#### b-matching for variable `n_i`
+
+- Perfect matching is `b_i = 1` for every vertex.
+- For general `b_i`, the problem is a **b-matching**: each vertex `i` must be incident to exactly `b_i` chosen edges.
+- On planar graphs, b-matchings can be handled by constructing a larger graph with `b_i` copies of each vertex, or by a generalized Pfaffian method.
+- On general graphs, use local Monte Carlo updates that preserve the vertex degree (degree-conserving bond swaps).
 
 #### Cost / scaling
 
-- **Planar Kasteleyn**: `O(N^3)` for the determinant; `O(N^2)` with fast algorithms.
-- **b-matching on planar graphs**: similar, using a modified Pfaffian.
-- **Arbitrary non-planar graphs**: #P-hard in general; approximate methods (cavity, Monte Carlo) are needed.
+- **Planar Kasteleyn**: `O(N^3)` for the determinant; `O(N^2)` with fast algorithms; near-linear for very large planar graphs with H-matrices.
+- **b-matching on planar graphs**: similar to perfect matching, with a constant-factor overhead from vertex replication.
+- **Arbitrary non-planar graphs**: #P-hard in general; approximate methods (cavity / Bethe–Peierls, Monte Carlo) are needed.
 
 #### Purpose
 
 - Exact resonance entropy for small molecules.
-- Statistical mechanics of dimer coverings (free energy, correlations).
+- Statistical mechanics of dimer coverings (free energy, correlations, local probabilities).
+- Benchmark for the classical KekulePure solver.
 
 #### Connection to our solver
 
 - The valence constraint `Σ_j p_ij = n_i` is the **fractional** b-matching condition.
 - The exact entropy of the Kekulé ensemble is the logarithm of the number of b-matchings.
+- Kasteleyn is the exact benchmark for small planar molecules; our iterative solver is the fast approximation for large or non-planar systems.
 - **Cheap improvement**: for small training molecules, compute `ln N_Kekulé` with Kasteleyn and fit the coefficient of the linear entropy `S_res`. For large systems, use the Bethe–Peierls / cavity approximation to the b-matching entropy, which scales as `O(N)`.
 
 The classical Kekulé bond-order idea is very old (Pauling, 1930s), but it has a modern echo in the study of **topological states in graphene**, **Kekulé bond-order distortions**, and **Kekulé edge reconstructions**, where the bond pattern can open gaps, create edge states, and stabilize non-trivial phases.
+
+---
+
+## 7.8 Clarifying the core concepts
+
+### 7.8.1 What is a Pfaffian, and why is the Kasteleyn matrix signed?
+
+The **Pfaffian** of a skew-symmetric matrix `K` is a sum over all ways to pair up the rows/columns, i.e. over all perfect matchings of the graph:
+
+\[
+\operatorname{Pf}(K) = \sum_M \operatorname{sgn}(M) \prod_{(ij) \in M} K_{ij}.
+\]
+
+Each matching comes with a sign `sgn(M)` that depends on the order in which the pairs are written. If we simply put the adjacency matrix into `K`, different matchings can have different signs and cancel each other. **Kasteleyn’s theorem** says: for a planar graph, we can assign signs to the edges so that every matching has the same sign. Then the Pfaffian is exactly the number of matchings:
+
+\[
+N_{\text{Kekulé}} = \operatorname{Pf}(K) = \sqrt{|\det(K)|}.
+\]
+
+The sign assignment is purely combinatorial: it comes from orienting the edges of the planar graph so that every face has an odd number of clockwise-pointing arrows. It has **nothing to do with current conservation** or Kirchhoff’s laws. Kirchhoff’s matrix-tree theorem counts spanning trees using the **Laplacian** matrix; Kasteleyn counts perfect matchings using a **skew-symmetric signed adjacency** matrix.
+
+### 7.8.2 What is a plaquette, and what is a flip?
+
+A **plaquette** is just a small face of the lattice. For a square lattice it is a square; for graphene it is a hexagon.
+
+In a **dimer covering** (a perfect matching), every vertex is touched by exactly one dimer. Consider a plaquette whose four boundary edges form a square. If the two **opposite** edges of the plaquette are occupied by dimers, the other two opposite edges are empty. A **flip** is the local move that swaps the occupied pair with the empty pair:
+
+```
+Before:           After:
+  i —— j           i    j
+  |    |           |    |
+  k —— l           k —— l
+
+Dimer edges:      Dimer edges:
+(i,j) and (k,l)  (i,k) and (j,l)
+```
+
+The two parallel dimers on one pair of opposite edges are replaced by the two parallel dimers on the other pair. Every vertex still has exactly one dimer; the hard-core constraint is preserved.
+
+### 7.8.3 Is a dimer covering one dimer or a pattern of many dimers?
+
+A **dimer covering** is a **global pattern** of many dimers that covers the whole graph. It is not a single dimer, and it is not a sum of independent dimers. The constraint is that every vertex is incident to exactly one chosen edge.
+
+Because of this constraint, the allowed states are **global patterns** (Kekulé structures). For a large lattice, the number of such patterns grows exponentially. We do not enumerate them independently. Instead, we use local moves (flips) to jump from one pattern to a nearby pattern, and we sample the patterns statistically.
+
+### 7.8.4 Can the Monte Carlo compute only local energy differences?
+
+Yes. In a local-update MC, the total energy is a sum of local bond energies. When a flip changes only a few bonds, the energy difference is
+
+\[
+\Delta E = E_{\text{new}} - E_{\text{old}} = \sum_{\text{changed bonds}} V_{\text{new}} - \sum_{\text{changed bonds}} V_{\text{old}}.
+\]
+
+All unchanged bonds contribute the same amount to both `E_new` and `E_old` and cancel. For a plaquette flip, only the four bonds of the plaquette (and perhaps their immediate neighbors) are involved. This is the key reason the method is cheap and GPU-friendly: each thread can compute a small local update without touching the rest of the system.
 
 ---
 
@@ -869,6 +1067,49 @@ Add the resonance-entropy term `S_res[p]` if you want to control the localizatio
   - Make BOP ↔ KekulePure self-consistency robust
   - Validate on small exact systems, then scale to graphene nanoribbons
   - Apply to redox-active aromatics (quinone, phenazine, pyrazine)
+
+---
+
+## 12. The intended numerical path: classical seed + local GPU statistics
+
+The focus of this project is **not** to diagonalize large matrices (not even Hückel `O(N^3)`), and certainly not to do full CI. The goal is to keep the solver fast, local, and GPU-friendly, while putting the classical bond-order model on a more rigorous physical footing.
+
+### 12.1 No large diagonalizations
+
+- **Kasteleyn** is not a diagonalization of a Hamiltonian; it is a determinant of a sparse signed adjacency matrix. It gives exact classical weights for planar graphs, but it is still `O(N^3)` and restricted to fixed, perfect matchings on planar graphs.
+- **Our iterative solver** (`KekulePure`) is the practical fallback: it handles non-planar graphs, variable `n_i`, arbitrary energy terms, and scales linearly with local updates.
+- **QMC / RVB** does not build MOs or density matrices; it samples compact dimer coverings and evaluates local energy changes.
+
+### 12.2 Classical seed
+
+1. Run `KekulePure` to get an approximate bond pattern `p_ij` and effective bond energies `V_ij`.
+2. From these, assign Boltzmann weights `w_ij = exp(-β V_ij)` to each edge.
+3. This gives a classical dimer model whose partition function and probabilities can be estimated by Kasteleyn (small/planar) or by local Monte Carlo (large/non-planar).
+
+### 12.3 Local GPU update strategy
+
+The covering is a list of occupied bonds. Each GPU thread handles a small local object:
+
+- **Plaquette flip** (QDM): four bonds around a plaquette are replaced by the complementary four bonds.
+- **Bond swap** (b-matching): rotate a pair of adjacent dimers among three atoms.
+- **RVB amplitude update**: recompute the local singlet product on the changed bonds.
+
+Because the moves are local, the energy change and acceptance probability can be computed from the few bonds involved. No global diagonalization is required. This is the same structure as the Coulomb/Ising GPU solvers you already have.
+
+### 12.4 What the quantum correction provides
+
+- It reweights the classical Kekulé structures according to their quantum (RVB) amplitudes, not just their classical energy.
+- It can move bond order away from the single classical minimum toward a more uniform, aromatic distribution.
+- It provides the kinetic/resonance energy that the classical entropy term approximates.
+
+### 12.5 Work plan
+
+1. Use `KekulePure` to get a fast classical baseline.
+2. For small molecules, use Kasteleyn to calibrate the entropy term `S_res`.
+3. For large systems, run a GPU local-update QMC sampler around the classical seed to add quantum fluctuations.
+4. Validate the final bond orders against Wiberg/Mayer indices from a small reference calculation.
+
+This keeps the method cheap, local, and GPU-friendly while connecting it to the rigorous RVB/QDM/QMC framework.
 
 ---
 
