@@ -5,11 +5,16 @@ Testing and deriving different things from numerical math mostly for computation
 ## Contents
 
 ### topics/
-Research documentation and utilities for mathematical functions used in computational chemistry.
 
-- **AngularFunctions/** - Mathematical derivations for angular potentials (sp1, sp2, sp3 hybridizations). Includes AI conversations about complex number tricks, quaternion approaches, spherical harmonics, and topological methods for tetrahedral symmetry.
-- **RadialFunctions/** - C² continuous radial functions optimized for GPU acceleration. Includes polynomial families, Lorentzian alternatives, and force derivative optimizations.
-  - `plot_radial.py` - Interactive matplotlib tool with sliders to visualize and tune radial function parameters.
+| Topic | Description |
+|-------|-------------|
+| **ChemicalGraphs/** | Python toolkit for molecular graph construction, heterocycle generation, and Kekule pi-bond order optimization. Includes ASCII art heterocycle parser, object-graph AtomicGraph, file I/O (.mol/.mol2/.xyz), and honeycomb lattice geometry |
+| **LinarElasticity/** | Vibration spectra of spring-mass truss systems — mechanical analogy for quantum lattice problems. Stiffness matrix assembly, Green-function probing, iterative solvers (Jacobi, CG, Chebyshev), GPU (OpenCL) backends |
+| **LinearAlgebra/** | Iterative and direct solvers for large sparse symmetric eigenvalue problems. Subfolders: `FastDirectSolvers/` (nested dissection, AMLS, GPU GEMM), `SpectralFiltering/` (Chebyshev-filtered subspace iteration, resolvent probing, spectral density) |
+| **LinearScalingQM/** | O(N) electronic structure methods with localized orbitals. Subfolders: `CheFSI/` (Chebyshev-filtered subspace iteration for frontier orbitals), `DensityMatrix/` (FOE, Green's function contour integration), `OMM/` (orbital minimization, CPU+GPU), `Kekule_BOP/` (bond-order potentials via Chebyshev probe), `KekuleQM/` (OpenCL valence-bond/QEq/SSH pi-electron model), `LLCAO1D/` (educational 1D LCAO solver), `TestSystems/` (1D/2D hydrogen test harnesses) |
+| **RadialFunctions/** | C² continuous radial functions optimized for GPU acceleration. Includes polynomial families, Lorentzian alternatives, and force derivative optimizations. (See also `UsefulFunctions/RadialFunctions/`) |
+| **SpectralFiltering/** | Test drivers for KPM Chebyshev spectral filtering and resolvent-based spectrum estimation on nanocrystal vibration benchmarks. Depends on solver modules from `LinearAlgebra/SpectralFiltering/` |
+| **UsefulFunctions/** | Reusable utility functions for atomistic simulations. Subfolders: `AngularFunctions/` (sp1/sp2/sp3 hybridization potentials via complex numbers and quaternions), `RadialFunctions/` (compact-support radial basis functions with C2-continuous cutoff, interactive `plot_radial.py` slider tool) |
 
 ### web/
 Interactive WebGL-based visualization tools for exploring angular functions.
