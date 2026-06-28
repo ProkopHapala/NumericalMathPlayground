@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Elasticity solver benchmark: generate hexagonal grid, build sparse neighbor matrix, visualize."""
+"""Elasticity solver benchmark: generate hexagonal grid, build sparse neighbor matrix, visualize.
+
+Thin wrapper that imports solver utilities from TrussSolver and plotting from TrussPlotting.
+"""
 
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+
+from TrussSolver import build_stiffness_hex
+from TrussPlotting import plot_hex_mesh, plot_matrix
 
 
 def generate_hex_grid(nx: int, ny: int, a: float = 1.0) -> np.ndarray:
@@ -74,57 +80,6 @@ def build_neighbors_hex(pos: np.ndarray, nx: int, ny: int, n_neigh_max: int = 8)
     return neighs
 
 
-def build_stiffness(nnode: int, neighs: np.ndarray, k0: float, k_sigma: float) -> np.ndarray:
-    """Build stiffness value matrix same shape as neighs.
-    Base stiffness k0 with relative Gaussian perturbation k_sigma.
-    Invalid slots (neigh == -1) remain 0.0.
-    """
-    k = np.zeros_like(neighs, dtype=np.float64)
-    mask = neighs >= 0
-    noise = np.random.normal(loc=0.0, scale=k_sigma, size=neighs.shape)
-    vals = k0 * (1.0 + noise)
-    k[mask] = vals[mask]
-    # ensure positive stiffness
-    k = np.clip(k, a_min=1e-6, a_max=None)
-    k[~mask] = 0.0
-    return k
-
-
-def plot_mesh(pos: np.ndarray, neighs: np.ndarray, title: str = "Mesh") -> None:
-    """Plot nodes and edges."""
-    fig, ax = plt.subplots(figsize=(6, 6))
-    nnode = pos.shape[0]
-    for i in range(nnode):
-        for j in range(neighs.shape[1]):
-            nb = neighs[i, j]
-            if nb >= 0:
-                ax.plot([pos[i, 0], pos[nb, 0]], [pos[i, 1], pos[nb, 1]], 'k-', lw=0.5, alpha=0.4)
-    ax.scatter(pos[:, 0], pos[:, 1], c='royalblue', s=20, zorder=5)
-    ax.set_aspect('equal')
-    ax.set_title(title)
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    plt.tight_layout()
-    return fig
-
-
-def plot_matrix(mat: np.ndarray, title: str = "Matrix", cmap: str = 'viridis', invalid_color: str = 'white') -> None:
-    """Plot matrix with nearest-neighbor interpolation.
-    For integer matrices (neighbor indices), -1 is treated as invalid (NaN)
-    and rendered in invalid_color.
-    """
-    fig, ax = plt.subplots(figsize=(8, 6))
-    plot_mat = mat.astype(np.float64).copy()
-    plot_mat[plot_mat == -1] = np.nan
-    im = ax.imshow(plot_mat, aspect='auto', interpolation='nearest', cmap=cmap)
-    # Set invalid (-1) color
-    im.cmap.set_bad(color=invalid_color)
-    ax.set_title(title)
-    plt.colorbar(im, ax=ax)
-    plt.tight_layout()
-    return fig
-
-
 def main():
     parser = argparse.ArgumentParser(description="Elasticity benchmark: hex grid sparse matrix generation and visualization.")
     parser.add_argument('--nx', type=int, default=16, help='Nodes in x direction')
@@ -145,7 +100,7 @@ def main():
     pos0 = generate_hex_grid(args.nx, args.ny, a=args.a)
     pos = perturb_positions(pos0, args.pos_sigma)
     neighs = build_neighbors_hex(pos, args.nx, args.ny, n_neigh_max=args.n_neigh_max)
-    stiff = build_stiffness(pos.shape[0], neighs, args.k0, args.k_sigma)
+    stiff = build_stiffness_hex(pos.shape[0], neighs, args.k0, args.k_sigma)
 
     # Summary
     nnode = pos.shape[0]
@@ -158,9 +113,19 @@ def main():
     print(f"Stiffness range: [{stiff[neighs >= 0].min():.4f}, {stiff[neighs >= 0].max():.4f}]")
 
     # Plot
-    fig_mesh = plot_mesh(pos, neighs, title=f"Hex Grid ({args.nx}x{args.ny}), pos_σ={args.pos_sigma}")
-    fig_neigh = plot_matrix(neighs, title="Neighbor Index Matrix", cmap='tab20')
-    fig_stiff = plot_matrix(stiff, title="Stiffness Matrix", cmap='plasma')
+    fig_mesh, ax_mesh = plt.subplots(figsize=(6, 6))
+    plot_hex_mesh(pos, neighs, title=f"Hex Grid ({args.nx}x{args.ny}), pos_σ={args.pos_sigma}", ax=ax_mesh)
+    plt.tight_layout()
+
+    fig_neigh, ax_neigh = plt.subplots(figsize=(8, 6))
+    ax_neigh, im_neigh = plot_matrix(neighs, title="Neighbor Index Matrix", cmap='tab20', ax=ax_neigh)
+    plt.colorbar(im_neigh, ax=ax_neigh)
+    plt.tight_layout()
+
+    fig_stiff, ax_stiff = plt.subplots(figsize=(8, 6))
+    ax_stiff, im_stiff = plot_matrix(stiff, title="Stiffness Matrix", cmap='plasma', ax=ax_stiff)
+    plt.colorbar(im_stiff, ax=ax_stiff)
+    plt.tight_layout()
 
     if args.save:
         fig_mesh.savefig(f"{args.save}_mesh.png", dpi=150)

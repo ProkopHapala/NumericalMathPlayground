@@ -20,14 +20,16 @@ This repo explores numerical math ideas through small, clear, reusable demos —
 - **Report Immediately.** Write ambiguities, unexpected errors, or risky decisions in the chat. No silent workarounds.
 - **Checkpoint & Preserve.** After significant changes, summarize what changed, what was verified, and what remains. Comment out old or experimental code with `# TODO` or `# DEBUG` instead of deleting it.
 
-## Rule 3 — Modular Demo Architecture
+## Rule 3 — Three-Layer Architecture (STRICT)
 
-**Avoid script explosion.** Do not generate millions of one-off scripts. Group related demos into a single script that exposes different examples via CLI options.
+Every topic must split code into three layers. 
 
-- **Backend / Frontend Split:**
-  - **Backend modules** implement algorithms as pure, reusable, data-oriented functions.
-  - **Frontend scripts** provide a thin, high-level CLI interface. They should be shallow and concise.
-  - **Plotting utilities** live in a separate shared module (e.g., `plot_utils.py`). No plotting inside core algorithms.
+1. **Core module** (e.g. `Truss.py`, `TrussSolver.py`) — math, algorithms, data structures. Pure functions, no I/O, no plotting.
+2. **Plotting module** (e.g. `TrussPlotting.py`) — all visualization functions. Shared and reusable across scripts.
+3. **Scripts** (e.g. `demo_BlockJacobiTruss.py`) — thin CLI wrapper. Parses command-line arguments, calls core + plotting, prints results. **No complex functions defined here.** If a helper is needed by more than one script, it goes in a module.
+
+**DO NOT** write complex single-purpose code/functions in test script, try to generalize and refactor into core or plotting modules. 
+
 - **Reusability First.** Before writing new code, check existing modules for functions you can reuse or generalize.
 - **Generalization Over Duplication.** If an existing function almost fits, prefer generalizing it with a new parameter over copy-pasting.
 - **Consolidate.** If you find yourself making `demo_a.py`, `demo_b.py`, `demo_c.py` for variants of the same idea, merge them into `demo.py --mode a|b|c`.
