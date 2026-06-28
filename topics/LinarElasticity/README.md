@@ -14,8 +14,12 @@ spectral filtering methods developed in `LinearAlgebra/`.
 | **Script** | `BlockJacobiTruss.py` | CLI benchmark: beam (`--mode beam`) and grid (`--mode grid`) tests comparing global Jacobi, block Jacobi, alternating patches, direct solves |
 | **Script** | `VibrationProbing.py` | CLI: mechanical Green-function probing for vibration spectra. Solves A(ω)x = b where A = K − (ω+iη)²M |
 | **Script** | `elasticity_benchmark.py` | CLI: hexagonal grid generation, sparse stiffness matrix, structure visualization |
+| **GPU Core** | `SparseTruss_ocl.py` | OpenCL manager: uploads truss data, compiles/caches kernels, dispatches block Jacobi, restriction, coarse solve, prolongation, and full V-cycle on GPU |
+| **GPU Kernel** | `kernels_block_jacobi.cl` | OpenCL kernel: block Jacobi smoothing with local memory, CSR sparse matvec, diagonal Dinv computation, residual |
+| **GPU Kernel** | `kernels_multigrid.cl` | OpenCL kernels: restriction (tree reduction with atomics), prolongation (tiled P matrix), dense Cholesky coarse solve |
+| **Script** | `demo_GPU.py` | CLI benchmark: compares direct solve, CPU Jacobi, CPU multigrid, and GPU multigrid (block Jacobi + spectral coarse) with convergence plots |
 
-Scripts are thin wrappers — all algorithms live in `TrussSolver.py`, all plotting in `TrussPlotting.py`. See `AGNETs.md` Rule 3.
+Scripts are thin wrappers — all algorithms live in `TrussSolver.py` (CPU) or `SparseTruss_ocl.py` (GPU), all plotting in `TrussPlotting.py`. See `AGNETs.md` Rule 3.
 
 ## Problem
 
@@ -40,6 +44,10 @@ python VibrationProbing.py --nx 3 --ny 3 --nfreq 50
 # Hex grid stiffness visualization
 python elasticity_benchmark.py --nx 8 --ny 8 --no-show
 
+# GPU multigrid benchmark (block Jacobi + spectral coarse grid)
+python demo_GPU.py --nx 32 --ny 32 --no-show
+python demo_GPU.py --nx 64 --ny 64 --no-show
+
 # Run Truss.py self-tests
 python Truss.py
 ```
@@ -49,3 +57,18 @@ python Truss.py
 - `BlockJacobiGPU.md` — full derivation of block Jacobi with overlapping patches, stiffness-weighted averaging, and heavy-ball momentum.
 - `low_rank_perturbation.md` — notes on low-rank perturbation theory for spectral filtering.
 - `Ascii2truss.md` — ASCII-art truss specification format.
+
+## GPU Multigrid
+
+The GPU implementation (`SparseTruss_ocl.py` + `.cl` kernels) provides OpenCL
+kernels for block Jacobi smoothing and multigrid restriction/prolongation using
+local memory and tiled data layouts. Workgroup size, cluster size, and max
+neighbors are compile-time `#define`s substituted via string manipulation.
+
+Benchmark results (NVIDIA GeForce GTX 1650):
+
+| Grid | Nodes | CPU MG (ms) | GPU MG (ms) | Speedup |
+|------|-------|-------------|-------------|---------|
+| 8×8 | 64 | 18.7 | 1.2 | 15× |
+| 32×32 | 1024 | 198.4 | 3.3 | 60× |
+| 64×64 | 4096 | 936.6 | 3.8 | 246× |
