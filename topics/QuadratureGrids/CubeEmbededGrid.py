@@ -161,6 +161,43 @@ def build_cartesian_outer(h, d, margin=5):
     return cart_xy[~inside], cart_w[~inside]
 
 
+def build_cartesian_fixed(R_cut, d, h_cut=None):
+    """Build Cartesian grid covering [-R_cut, R_cut]² with exact step d.
+
+    Uses arange with step d, then trims points outside [-R_cut, R_cut].
+    This keeps the step exactly d (aligned with inner grid) while ensuring
+    the grid doesn't extend beyond R_cut.
+
+    If h_cut is given, points inside [-h_cut, h_cut]² are removed (they'll
+    be replaced by the inner pseudo-radial grid).
+
+    Parameters
+    ----------
+    R_cut : float — half-size of the total covered area (fixed, independent of d)
+    d : float — grid step (exact)
+    h_cut : float or None — if given, remove points inside [-h_cut, h_cut]²
+
+    Returns
+    -------
+    xy : (N, 2) — grid point coordinates
+    w : (N,) — weights (all d²)
+    """
+    n_side = int(np.ceil(R_cut / d))
+    x_cart = np.arange(-n_side, n_side + 1) * d
+    y_cart = np.arange(-n_side, n_side + 1) * d
+    xx, yy = np.meshgrid(x_cart, y_cart)
+    cart_xy = np.column_stack([xx.ravel(), yy.ravel()])
+    cart_w = np.full(len(cart_xy), d * d)
+    # Trim points outside [-R_cut, R_cut]
+    inside_extent = (np.abs(cart_xy[:, 0]) <= R_cut) & (np.abs(cart_xy[:, 1]) <= R_cut)
+    cart_xy = cart_xy[inside_extent]
+    cart_w = cart_w[inside_extent]
+    if h_cut is not None:
+        inside = (np.abs(cart_xy[:, 0]) < h_cut) & (np.abs(cart_xy[:, 1]) < h_cut)
+        return cart_xy[~inside], cart_w[~inside]
+    return cart_xy, cart_w
+
+
 def build_combined_grid(grid_dict, d=None, margin=5):
     """
     Build combined grid: inner cell-center points + outer Cartesian.

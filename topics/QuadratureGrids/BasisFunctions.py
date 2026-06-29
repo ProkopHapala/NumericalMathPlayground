@@ -187,6 +187,10 @@ def get_radial_functions(mol, r_grid):
             l = 2
             key = (l, orb_name.replace('dz^2', 'd').replace('dz2', 'd'))
             angular = 2 * r_grid**2
+        elif 'f+0' in orb_name or 'f0' in orb_name:
+            l = 3
+            key = (l, orb_name)
+            angular = r_grid**3
         elif 'd' in orb_name:
             continue
         else:
@@ -228,3 +232,230 @@ def compute_radial_extent(r_grid, R, threshold_frac=0.01, r_min=0.01):
     r_extent = r_nz[beyond[0]] if len(beyond) > 0 else r_grid[-1]
     r_max = r_nz[np.argmax(R_nz)]
     return r_extent, r_max, R_abs.max()
+
+
+# ── Atomic orbital trial functions (from pySCF basis sets) ────────────────────
+
+def _double_factorial(n):
+    """n!! = n·(n-2)·...·1 or 2. (-1)!! = 0!! = 1."""
+    if n <= 0:
+        return 1
+    r = 1
+    while n > 0:
+        r *= n
+        n -= 2
+    return r
+
+
+def _gaussian_moment_2d(nx, ny, gamma):
+    """∫ x^nx y^ny exp(-γ r²) dA over 2D. Odd powers → 0."""
+    if nx % 2 == 1 or ny % 2 == 1:
+        return 0.0
+    m, n = nx // 2, ny // 2
+    return _double_factorial(2*m - 1) * _double_factorial(2*n - 1) * np.pi / (2**(m+n) * gamma**(m+n+1))
+
+
+def _angular_poly_matrix(kind, a, b):
+    """Polynomial coefficient matrix for angular part. poly[i,j] = coeff of x^i y^j."""
+    if kind == 's':
+        p = np.zeros((1, 1)); p[0, 0] = 1.0
+    elif kind == 'p_v':
+        p = np.zeros((2, 2)); p[1, 0] = a; p[0, 1] = b
+    elif kind == 'd_vv':
+        p = np.zeros((3, 3)); p[2, 0] = a*a; p[1, 1] = 2*a*b; p[0, 2] = b*b
+    elif kind == 'd_vu':
+        p = np.zeros((3, 3)); p[2, 0] = -a*b; p[1, 1] = a*a - b*b; p[0, 2] = a*b
+    else:
+        raise ValueError(f"Unknown angular kind: {kind}")
+    return p
+
+
+def _poly_product(p1, p2):
+    """Multiply two polynomial coefficient matrices."""
+    n1, m1 = p1.shape
+    n2, m2 = p2.shape
+    result = np.zeros((n1 + n2 - 1, m1 + m2 - 1))
+    for i1 in range(n1):
+        for j1 in range(m1):
+            if p1[i1, j1] == 0:
+                continue
+            for i2 in range(n2):
+                for j2 in range(m2):
+                    if p2[i2, j2] == 0:
+                        continue
+                    result[i1+i2, j1+j2] += p1[i1, j1] * p2[i2, j2]
+    return result
+
+
+def _overlap_2d(desc_i, desc_j):
+    """Analytic ∫ φ_i φ_j dA over 2D for two basis function descriptors."""
+    pi = _angular_poly_matrix(desc_i['angular_kind'], *desc_i['v'])
+    pj = _angular_poly_matrix(desc_j['angular_kind'], *desc_j['v'])
+    pp = _poly_product(pi, pj)
+    total = 0.0
+    for a_i, c_i in zip(desc_i['exps'], desc_i['coefs']):
+        for a_j, c_j in zip(desc_j['exps'], desc_j['coefs']):
+            gamma = a_i + a_j
+            for ix in range(pp.shape[0]):
+                for iy in range(pp.shape[1]):
+                    if pp[ix, iy] != 0:
+                        total += c_i * c_j * pp[ix, iy] * _gaussian_moment_2d(ix, iy, gamma)
+    return total
+
+
+def extract_pyscf_shells(elements, basis_name='cc-pVDZ'):
+    """Extract contracted Gaussian shells from pySCF for given elements.
+
+    Returns list of dicts: {element, l, exps, coefs, label}
+    """
+    from pyscf import gto
+    shells = []
+    for elem in elements:
+        nelec = gto.mole.charge(elem)
+        spin = nelec % 2
+        mol = gto.M(atom=f'{elem} 0 0 0', basis=basis_name, spin=spin)
+        for ib in range(mol.nbas):
+            l = mol.bas_angular(ib)
+            nctr = mol.bas_nctr(ib)
+            exps = mol.bas_exp(ib)
+            coefs = mol.bas_ctr_coeff(ib)  # (nprim, nctr)
+            for j in range(nctr):
+                shells.append(dict(
+                    element=elem, l=l,
+                    exps=exps.copy(), coefs=coefs[:, j].copy(),
+                    label=f'{elem} l={l} ctr={j}',
+                ))
+    return shells
+
+
+def build_atomic_basis(elements, basis_name='cc-pVDZ', n_angular_dirs=8, seed=42):
+    """Build atomic basis function set with angular variants.
+
+    For each radial shell:
+      l=0 (s): 1 angular variant (isotropic)
+      l=1 (p): n_angular_dirs variants (p along random directions)
+      l=2 (d): 2*n_angular_dirs variants (d_vv and d_vu per direction)
+
+    Returns list of basis function descriptors.
+    """
+    raw_shells = extract_pyscf_shells(elements, basis_name)
+    rng = np.random.RandomState(seed)
+    descs = []
+    for shell in raw_shells:
+        l = shell['l']
+        if l == 0:
+            descs.append(dict(**shell, angular_kind='s', v=(1.0, 0.0), u=(0.0, 1.0)))
+        elif l == 1:
+            for _ in range(n_angular_dirs):
+                theta = rng.uniform(0, 2*np.pi)
+                a, b = np.cos(theta), np.sin(theta)
+                descs.append(dict(**shell, angular_kind='p_v', v=(a, b), u=(-b, a)))
+        elif l == 2:
+            for _ in range(n_angular_dirs):
+                theta = rng.uniform(0, 2*np.pi)
+                a, b = np.cos(theta), np.sin(theta)
+                descs.append(dict(**shell, angular_kind='d_vv', v=(a, b), u=(-b, a)))
+                descs.append(dict(**shell, angular_kind='d_vu', v=(a, b), u=(-b, a)))
+    return descs
+
+
+def eval_basis_functions(xy, basis_descs):
+    """Evaluate all basis functions at xy points. Returns (n_basis, Npts) array."""
+    x = xy[:, 0]
+    y = xy[:, 1]
+    r2 = x**2 + y**2
+    n_basis = len(basis_descs)
+    Npts = len(xy)
+    vals = np.zeros((n_basis, Npts))
+    for i, desc in enumerate(basis_descs):
+        radial = np.zeros(Npts)
+        for a, c in zip(desc['exps'], desc['coefs']):
+            radial += c * np.exp(-a * r2)
+        kind = desc['angular_kind']
+        a_d, b_d = desc['v']
+        if kind == 's':
+            angular = 1.0
+        elif kind == 'p_v':
+            angular = a_d * x + b_d * y
+        elif kind == 'd_vv':
+            angular = (a_d * x + b_d * y)**2
+        elif kind == 'd_vu':
+            angular = (a_d * x + b_d * y) * (-b_d * x + a_d * y)
+        vals[i] = angular * radial
+    return vals
+
+
+def compute_overlap_matrix(basis_descs):
+    """Compute analytic overlap matrix S_ij = ∫φ_i φ_j dA over 2D."""
+    n = len(basis_descs)
+    S = np.zeros((n, n))
+    for i in range(n):
+        for j in range(i, n):
+            S[i, j] = _overlap_2d(basis_descs[i], basis_descs[j])
+            S[j, i] = S[i, j]
+    return S
+
+
+def build_atomic_trial_set(elements=['H', 'C', 'N', 'O'], basis_name='cc-pVDZ',
+                           n_angular_dirs=8, n_combos=200, seed=42):
+    """Build atomic orbital trial function set.
+
+    Pipeline:
+      1. Extract radial shells from pySCF
+      2. Generate angular variants (s, p_v, d_vv, d_vu)
+      3. Compute analytic overlap matrix
+      4. Generate random linear combinations (normalized to unit integral)
+
+    Returns dict with:
+        basis_descs : list of basis function descriptors
+        S : (n_basis, n_basis) overlap matrix
+        C : (n_combos, n_basis) random combination coefficients (normalized)
+        n_radial : number of radial shells (step 1)
+        n_basis : number of angular variants (step 2)
+        n_combos : number of random combinations (step 4)
+    """
+    raw_shells = extract_pyscf_shells(elements, basis_name)
+    n_radial = len(raw_shells)
+
+    basis_descs = build_atomic_basis(elements, basis_name, n_angular_dirs, seed)
+    n_basis = len(basis_descs)
+
+    S = compute_overlap_matrix(basis_descs)
+
+    rng = np.random.RandomState(seed + 1)
+    C = rng.randn(n_combos, n_basis)
+    # Normalize each combination so ∫|Σ c_j φ_j|² dA = 1
+    norms = np.sqrt(np.maximum(np.einsum('ki,ij,kj->k', C, S, C), 1e-30))
+    C = C / norms[:, np.newaxis]
+
+    # Count angular forks per l
+    n_s = sum(1 for d in basis_descs if d['angular_kind'] == 's')
+    n_p = sum(1 for d in basis_descs if d['angular_kind'] == 'p_v')
+    n_d = sum(1 for d in basis_descs if d['angular_kind'].startswith('d'))
+
+    print(f"\n── Atomic trial function set ──────────────────────────────────")
+    print(f"  Elements: {elements}, basis: {basis_name}")
+    print(f"  Radial shells (step 1): {n_radial}")
+    print(f"  Angular variants (step 2): {n_basis}  (s={n_s}, p={n_p}, d={n_d})")
+    print(f"  Random combinations (step 3): {n_combos}")
+    print(f"  Total trial functions: {n_combos}")
+
+    return dict(
+        basis_descs=basis_descs, S=S, C=C,
+        n_radial=n_radial, n_basis=n_basis, n_combos=n_combos,
+        raw_shells=raw_shells,
+    )
+
+
+def eval_trial_functions(xy, trial_set):
+    """Evaluate trial functions at xy points. Returns (n_combos, Npts) array of f = (Σ c_j φ_j)²."""
+    B = eval_basis_functions(xy, trial_set['basis_descs'])
+    F = (trial_set['C'] @ B)**2
+    return F
+
+
+def trial_analytic_integrals(trial_set):
+    """Compute analytic integrals ∫f_k dA for all trial functions. Returns (n_combos,) array."""
+    C = trial_set['C']
+    S = trial_set['S']
+    return np.einsum('ki,ij,kj->k', C, S, C)

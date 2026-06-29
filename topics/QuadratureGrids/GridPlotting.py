@@ -556,3 +556,266 @@ def plot_lambda_sweep(results, lambdas, w0_orbit):
     fig.suptitle('CubeEmbededAtoms: regularization sweep', fontsize=14)
     plt.tight_layout()
     return fig
+
+
+# ── Parameter sweep plotting ──────────────────────────────────────────────────
+
+def plot_param_sweep(sweep_results, param_names, param_values, default_params):
+    """Plot 1D error trends for each parameter sweep.
+
+    Parameters
+    ----------
+    sweep_results : dict param_name -> list of result dicts
+    param_names : list of parameter names
+    param_values : dict param_name -> list of values
+    default_params : dict of default parameter values
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = axes.ravel()
+
+    for i, pname in enumerate(param_names):
+        ax = axes[i]
+        results = sweep_results[pname]
+        vals = param_values[pname]
+
+        mean_errs = [r['mean_err'] for r in results]
+        max_errs = [r['max_err'] for r in results]
+        npts_list = [r['Npts'] for r in results]
+
+        ax.semilogy(vals, mean_errs, 'o-', label='Mean error', color='steelblue', linewidth=2)
+        ax.semilogy(vals, max_errs, 's--', label='Max error', color='crimson', linewidth=1.5)
+
+        # Mark default value
+        default_val = default_params[pname]
+        ax.axvline(default_val, color='gray', linestyle=':', alpha=0.5, label='default')
+
+        ax.set_xlabel(pname, fontsize=12)
+        ax.set_ylabel('Integration error (%)', fontsize=12)
+        ax.set_title(f'Error vs {pname}', fontsize=13)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+        # Add secondary x-axis with Npts
+        ax2 = ax.twiny()
+        ax2.set_xlim(ax.get_xlim())
+        ax2.set_xticks(vals)
+        ax2.set_xticklabels([f'{n}' for n in npts_list], fontsize=7, rotation=45)
+        ax2.set_xlabel('Npts', fontsize=9)
+
+    fig.suptitle('Weight optimization error vs grid parameters', fontsize=15, y=1.02)
+    plt.tight_layout()
+    return fig
+
+
+def plot_pathological_functions(result, grid_pts, trial_set, top_n=6):
+    """Plot the trial functions with highest integration errors.
+
+    Shows both inner grid points (colored by function value) and outer
+    embedding grid points (small grey dots) to visualize the full grid.
+
+    Parameters
+    ----------
+    result : dict from optimize_single_config
+    grid_pts : (Npts, 2) grid points
+    trial_set : dict from build_atomic_trial_set
+    top_n : number of worst functions to show
+    """
+    errs = result['errs']
+    F_sq = result['F_sq']
+    b_inner = result['b_inner']
+    pred = result['pred']
+    outer_xy = result['outer_xy']
+    outer_w = result['outer_w']
+    h = result['grid_dict']['params']['h']
+
+    # Sort by error, get top_n worst
+    sorted_idx = np.argsort(errs)[::-1][:top_n]
+
+    cols = min(top_n, 3)
+    rows = (top_n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4.5 * rows), squeeze=False)
+
+    for i, k in enumerate(sorted_idx):
+        ax = axes[i // cols, i % cols]
+        vals = F_sq[k]
+        vmax = np.max(np.abs(vals))
+
+        # Outer embedding grid points (small grey dots)
+        ax.scatter(outer_xy[:, 0], outer_xy[:, 1], c='lightgray', s=3,
+                   marker='s', alpha=0.4, label='outer (embedding)', zorder=1)
+
+        # Inner grid points colored by function value
+        sc = ax.scatter(grid_pts[:, 0], grid_pts[:, 1], c=vals, s=12,
+                        cmap='hot_r', vmin=0, vmax=vmax, edgecolors='black',
+                        linewidths=0.2, label='inner (optimized)', zorder=3)
+        plt.colorbar(sc, ax=ax, shrink=0.7)
+
+        # Draw cutout boundary
+        rect = plt.Rectangle((-h, -h), 2*h, 2*h, fill=False,
+                             edgecolor='blue', linewidth=1.5, linestyle='--', alpha=0.5)
+        ax.add_patch(rect)
+
+        err_pct = errs[k]
+        ax.set_title(f'#{k}: err={err_pct:.2f}%\nI_target={b_inner[k]:.4f}, I_pred={pred[k]:.4f}',
+                     fontsize=10)
+        ax.set_aspect('equal')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        if i == 0:
+            ax.legend(fontsize=7, loc='upper right')
+
+    # Hide unused subplots
+    for i in range(top_n, rows * cols):
+        axes[i // cols, i % cols].axis('off')
+
+    fig.suptitle(f'Pathological trial functions (worst {top_n}) — '
+                 f'd={result["d"]}, n={result["n"]}, α={result["alpha"]}, '
+                 f'n_blend={result["n_blend"]}', fontsize=13, y=1.02)
+    plt.tight_layout()
+    return fig
+
+
+def plot_grid_overview(all_results, param_names, param_values, defaults):
+    """Show all grid geometries tried, with embedding grid.
+
+    One row per sweep parameter, up to 7 columns per row.
+    Grey squares = outer embedding grid, blue dots = inner grid, red dashed = cutout.
+
+    Parameters
+    ----------
+    all_results : dict param_name -> list of result dicts
+    param_names : list of parameter names
+    param_values : dict param_name -> list of values
+    defaults : dict of default parameter values
+    """
+    n_sweeps = len(param_names)
+    fig, axes = plt.subplots(n_sweeps, 7, figsize=(20, 3.5 * n_sweeps), squeeze=False)
+
+    for row, pname in enumerate(param_names):
+        results = all_results[pname]
+        vals = param_values[pname]
+        n_configs = len(vals)
+        idx_subset = np.linspace(0, n_configs - 1, min(n_configs, 7), dtype=int) if n_configs > 7 else range(n_configs)
+
+        for col, idx in enumerate(idx_subset):
+            ax = axes[row, col]
+            r = results[idx]
+            h = r['grid_dict']['params']['h']
+
+            # Outer embedding grid
+            ax.scatter(r['outer_xy'][:, 0], r['outer_xy'][:, 1],
+                       c='lightgray', s=2, marker='s', alpha=0.3)
+
+            # Inner grid
+            ax.scatter(r['grid_pts'][:, 0], r['grid_pts'][:, 1],
+                       c='steelblue', s=4, alpha=0.7)
+
+            # Cutout boundary
+            rect = plt.Rectangle((-h, -h), 2*h, 2*h, fill=False,
+                                 edgecolor='red', linewidth=1, linestyle='--', alpha=0.5)
+            ax.add_patch(rect)
+
+            val = vals[idx]
+            is_default = (val == defaults[pname])
+            title_str = f'{pname}={val}'
+            if is_default:
+                title_str += ' (default)'
+            ax.set_title(title_str, fontsize=9, color='red' if is_default else 'black')
+            ax.set_aspect('equal')
+            ax.set_xlabel('x', fontsize=7)
+            ax.set_ylabel('y', fontsize=7)
+            ax.tick_params(labelsize=6)
+
+            # Set consistent limits
+            margin_xy = h + 2 * r['d']
+            ax.set_xlim(-margin_xy, margin_xy)
+            ax.set_ylim(-margin_xy, margin_xy)
+
+        # Hide unused columns
+        for col in range(len(list(idx_subset)), 7):
+            axes[row, col].axis('off')
+
+        # Row label
+        axes[row, 0].annotate(pname, xy=(-0.15, 0.5), xycoords='axes fraction',
+                              fontsize=12, fontweight='bold', ha='center', va='center',
+                              rotation=90)
+
+    fig.suptitle('Grid geometries with embedding (grey=square outer, blue=inner, red=cutout)',
+                 fontsize=14, y=1.01)
+    plt.tight_layout()
+    return fig
+
+
+def plot_dscan_grids_weights(d_results, d_values):
+    """Plot grid geometry + weight ratio w/w_geom for each d in the d-scan.
+
+    Two rows:
+      Row 1: grid points (inner colored by w_opt, outer grey), size ∝ w_geom
+      Row 2: weight ratio w_opt/w_geom (diverging colormap centered at 1.0)
+
+    Parameters
+    ----------
+    d_results : list of result dicts from optimize_single_config (one per d)
+    d_values : list of d values
+    """
+    n = len(d_results)
+    fig, axes = plt.subplots(2, n, figsize=(3.5 * n, 8), squeeze=False)
+
+    for col, (r, dval) in enumerate(zip(d_results, d_values)):
+        h = r['grid_dict']['params']['h']
+        grid_pts = r['grid_pts']
+        w_opt = r['w_opt']
+        w0 = r['w0']
+        outer_xy = r['outer_xy']
+
+        # Point sizes proportional to w_geom for bottom row; small fixed for top
+        w0_pos = np.maximum(w0, 1e-12)
+        sizes_big = np.clip(w0_pos / np.median(w0_pos) * 15, 2, 80)
+
+        # Row 1: grid geometry with optimized weights (small points, zoomed out)
+        ax = axes[0, col]
+        ax.scatter(outer_xy[:, 0], outer_xy[:, 1], c='lightgray', s=1,
+                   marker='s', alpha=0.3)
+        sc = ax.scatter(grid_pts[:, 0], grid_pts[:, 1], c=w_opt, s=5,
+                        cmap='RdBu_r', vmin=min(w_opt.min(), -0.01),
+                        vmax=max(w_opt.max(), 0.01))
+        plt.colorbar(sc, ax=ax, shrink=0.6, label='w_opt')
+        rect = plt.Rectangle((-h, -h), 2*h, 2*h, fill=False,
+                             edgecolor='red', linewidth=1, linestyle='--', alpha=0.5)
+        ax.add_patch(rect)
+        n_neg = int(np.sum(w_opt < 0))
+        ax.set_title(f'd={dval}, n={r["n"]}\nN={r["Npts"]}, orbits={r["N_orbits"]}, '
+                     f'neg={n_neg}',
+                     fontsize=9)
+        ax.set_aspect('equal')
+        ax.set_xlabel('x', fontsize=7)
+        ax.set_ylabel('y', fontsize=7)
+        ax.tick_params(labelsize=6)
+
+        # Row 2: weight ratio w/w_geom (centered at 1.0)
+        ax2 = axes[1, col]
+        ratio = w_opt / w0_pos
+        # Diverging colormap centered at 1.0
+        vmax = max(np.abs(ratio.min() - 1), np.abs(ratio.max() - 1), 0.01)
+        sc2 = ax2.scatter(grid_pts[:, 0], grid_pts[:, 1], c=ratio, s=sizes_big,
+                          cmap='RdBu_r', vmin=1-vmax, vmax=1+vmax)
+        plt.colorbar(sc2, ax=ax2, shrink=0.6, label='w/w_geom')
+        rect2 = plt.Rectangle((-h, -h), 2*h, 2*h, fill=False,
+                              edgecolor='red', linewidth=1, linestyle='--', alpha=0.5)
+        ax2.add_patch(rect2)
+        ax2.set_title(f'train={r["mean_err"]:.3f}%  val={r["val_mean_err"]:.3f}%\n'
+                      f'max_val={r["val_max_err"]:.3f}%',
+                      fontsize=9)
+        ax2.set_aspect('equal')
+        ax2.set_xlabel('x', fontsize=7)
+        ax2.set_ylabel('y', fontsize=7)
+        ax2.tick_params(labelsize=6)
+
+    axes[0, 0].set_ylabel('w_opt', fontsize=11, labelpad=40)
+    axes[1, 0].set_ylabel('w/w_geom', fontsize=11, labelpad=40)
+
+    fig.suptitle('D-scan: grid geometry (top) & weight ratio w/w_geom (bottom)\n'
+                 'cutout h=2.5 fixed, n adjusted as 2h/d',
+                 fontsize=13, y=1.02)
+    plt.tight_layout()
+    return fig

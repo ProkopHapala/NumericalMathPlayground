@@ -74,6 +74,69 @@ Tikhonov-regularized least squares.
 - `validate_sto3g(grid_pts, w_inner, outer_xy, outer_w)` — validate against STO-3G orbital densities (not in training set)
 - `select_best_lambda(results, w0_orbit)` — pick λ with stable weights and lowest error
 
+### `OctagonGrid.py`
+Octagon-shaped radial insert grid using Treutler-Ahlrichs M4 (TA-M4) radial
+mapping, snapped to an octagon boundary that fits exactly in a 4×4 Cartesian
+grid patch.
+
+- `build_octagon_ta_grid(d, n, n_ta, xi)` — build the octagon grid with TA-M4 radial shells. Inner shells are uniform circles; outermost shell is snapped to octagon boundary points. Returns points, mesh data, TA-M4 weights, and diagnostics.
+- `treutler_ahlrichs_radial(N, xi)` — TA-M4 radial quadrature: Chebyshev 2nd kind nodes with Jacobian-weighted integration. Returns radial points and weights `w_r = r * dr`.
+- `build_full_mesh(grid_dict, margin)` — extract vertex points, polygons, and region labels (0=inner octagon, 1=interface, 2=outer Cartesian).
+- `classify_nodes(nodes, polys, regions, grid_dict)` — classify vertices as `inner`, `near_interface`, `interface`, or `outer`.
+- `compute_ta_weights(grid_dict)` — compute per-cell TA-M4 quadrature weights.
+- `mesh_diagnostics(nodes, polys, regions, grid_dict)` — angular uniformity, edge ratios, aspect ratios, chirality, strain.
+
+**Grid geometry**: The octagon is a 4×4 Cartesian patch with 4 corner triangles cut (each ½d²), giving area = 16d² - 4×½d² = **14d²**. With d=0.2Å (0.378 Bohr), n=4: h=2d=0.756 Bohr, hs=d=0.378 Bohr.
+
+### `demo_octagon_ta.py`
+Octagon grid construction, mesh visualization, and **interface weight optimization**.
+
+```
+python demo_octagon_ta.py    # generates mesh plots + optimization results
+```
+
+#### Interface Weight Optimization
+
+The grid has three regions with different weight sources:
+- **Inner** (TA-M4 radial quadrature, shells 1..n_ta-1): weights = `w_ta[j] * (2π/Nu)`, renormalized so inner + interface geometric = exact octagon area.
+- **Interface** (snapped octagon boundary layer, 16 points): **optimized** via Tikhonov-regularized least squares with C4v symmetry (3 orbits: 4+8+4 points).
+- **Outer** (Cartesian grid, d² per point): uniform weights with d²/2 on domain edges and d²/4 on corners. Octagon boundary points get partial weights via Monte Carlo cell-fraction estimation.
+
+**Weight normalization** (reality check before optimization):
+- TA-M4 weights are renormalized: `2π * Σ_{j=0}^{n_ta-2} w_ta[j] = octagon_area - w_iface_geom`
+- Outer grid: `Σ w_outer = total_area - octagon_area` (achieved via partial boundary weights, not global scaling)
+- All weight sums match areas to <0.01d²
+
+**Optimization setup**:
+- 46 Gaussian test functions (ζ=0.5..12.0, off-center, x²G variants) with analytic integrals
+- Area constraint weighted 1000× (const function)
+- Tikhonov regularization: λ sweep over [1e-6 .. 1e10], best λ selected by minimum mean error
+- C4v symmetry: 3 free orbit weights instead of 16 individual weights
+
+**Results** (d=0.2Å, n=4, n_ta=8, 46 test functions):
+
+| Metric | Baseline (geometric) | Optimized (λ=1.0) |
+|--------|---------------------|-------------------|
+| Mean error | 7.42% | **5.90%** |
+| Max error | 21.68% | 21.38% |
+| const (area) | 0.19% | **0.00%** |
+| G(ζ=0.5) | 4.37% | **0.07%** |
+| G(ζ=1.0) | 9.62% | **0.18%** |
+| G(ζ=1.5) | 6.13% | **1.91%** |
+| G(ζ=2.0) | 3.54% | 7.34% |
+| G(ζ=5.0) | 18.13% | 18.13% |
+
+**Key findings**:
+- Optimization dramatically improves broad/medium Gaussians (ζ≤1.5): errors reduced to <2%
+- Narrow Gaussians (ζ≥5.0) remain at ~18% — this is the **TA-M4 radial quadrature limit** with only 8 shells, not an interface weight problem
+- The area constraint is satisfied exactly after optimization
+- Only 3 free parameters (C4v orbits) are sufficient to improve broad Gaussian integration by 5-10×
+
+**Orbit weights** (w0 → w_opt):
+- Orbit 0 (edge midpoints, 4 pts): 0.0495 → -0.0062
+- Orbit 1 (edge quarters, 8 pts): 0.0584 → 0.0670
+- Orbit 2 (corners, 4 pts): 0.0000 → 0.0380
+
 ## Plotting Modules
 
 ### `GridPlotting.py`
@@ -141,6 +204,16 @@ python demo_atomic_radial.py --rmax 10 --nr 2000       # radial range and resolu
 
 Produces 3 figures: raw R(r), normalized R(r)/R_max, and radial density r²|R(r)|².
 Also prints a table of radial extents per orbital.
+
+### `demo_octagon_ta.py`
+Octagon grid with TA-M4 radial insert: mesh construction, interface weight
+optimization with C4v symmetry, and error diagnostics. See the
+[Interface Weight Optimization](#interface-weight-optimization) section above
+for detailed results.
+
+```
+python demo_octagon_ta.py    # mesh sweep + interface optimization + diagnostics
+```
 
 ## Output
 
