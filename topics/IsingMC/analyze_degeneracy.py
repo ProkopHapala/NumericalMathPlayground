@@ -1,37 +1,22 @@
 #!/usr/bin/env python
 """Analyze degeneracy at specific (W1,W2) for T_extended_output cluster."""
 import sys, os
-sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from IsingExactSolver import IsingExactSolver, sq_lattice_sparse, apply_input_bias, INPUT_COMBOS
 import numpy as np
+from IsingExactSolver import IsingExactSolver, sq_lattice_sparse, apply_input_bias, INPUT_COMBOS, compute_input_bias
+from Ising_utils import CLUSTERS_FULL, check_ground_state_uniqueness
 
 print("Creating solver...")
 solver = IsingExactSolver(preferred_vendor='nvidia', bPrint=False)
 
-# T_extended_output cluster
-def make_cluster_T_extended_output():
-    positions = np.array([
-        [0,3], [2,3],   # under pads (sites 0,1)
-        [0,2], [1,2], [2,2],  # crossbar (sites 2,3,4)
-        [1,1],          # upper stem (site 5)
-        [1,0],          # lower stem (site 6)
-        [1,-1],         # output (site 7)
-    ], dtype=int)
-    input_positions = [(-1, 3), (3, 3)]
-    input_neighbors = [[0], [1]]  # site 0 neighbors A pad, site 1 neighbors B pad
-    output_site = 7
-    return positions, input_positions, input_neighbors, output_site
-
-pos, inp_pos, inp_neigh, out_site = make_cluster_T_extended_output()
+pos, inp_pos, inp_neigh, out_site = CLUSTERS_FULL['T_extended_output'](input_pos_type='side')
 nSite = len(pos)
 Eb = -np.ones(nSite, dtype=np.float32)
 
 W1, W2 = 2.0, 1.0
 print(f"\n=== Analyzing T_extended_output at W1={W1}, W2={W2} ===\n")
 
-# Build Esite for each input combo
-from IsingExactSolver import compute_input_bias
 Esite_batch = np.zeros((4, nSite), dtype=np.float32)
 for k, (A, B) in enumerate(INPUT_COMBOS):
     print(f"\nDEBUG Input ({A}, {B}):")
@@ -45,15 +30,11 @@ for k, (A, B) in enumerate(INPUT_COMBOS):
     print(f"  bias = {bias}")
     print(f"  Esite = {Esite_batch[k]}")
 
-# Build W
 W_val, W_idx, nNeigh = sq_lattice_sparse(positions=pos, W1=W1, W2=W2, nSite=nSite)
-
-# Reshape for batch
 W_val_batch = np.tile(W_val, (4, 1, 1))
 W_idx_batch = np.tile(W_idx, (4, 1, 1))
 nNeigh_batch = np.tile(nNeigh, (4, 1))
 
-# Get top8 states
 E_top8, occ_top8 = solver.solve_batch_W_top8(Esite_batch, W_val_batch, W_idx_batch, nNeigh_batch, nSite)
 
 print("Top 8 states for each input combination:")
@@ -69,7 +50,6 @@ for k, (A, B) in enumerate(INPUT_COMBOS):
         output_val = (occ_mask >> out_site) & 1
         print(f"    {i+1}. E={E_top8[k,i]:.6f}, output={output_val}, occ=0b{occ_mask:09b} = {occ_array}")
     
-    # Check ground state gap
     ground_gap = E_top8[k, 1] - E_top8[k, 0]
     print(f"  Ground state gap: {ground_gap:.6f}")
     if ground_gap < 0.01:
@@ -77,7 +57,6 @@ for k, (A, B) in enumerate(INPUT_COMBOS):
     else:
         print(f"  >>> OK: Ground state is well-defined")
 
-# Summary
 print("\n" + "=" * 80)
 print("SUMMARY:")
 print("=" * 80)

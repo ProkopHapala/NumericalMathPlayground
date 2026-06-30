@@ -36,13 +36,18 @@ from IsingExactSolver import (
     scan_W1_W2_top8,
     identify_logic,
     occ_mask_to_array,
+    INPUT_COMBOS, LOGIC_NAMES, USEFUL_LOGIC, MAX_NEIGH,
+)
+from Ising_utils import CLUSTERS_FULL, compute_energy_py
+from IsingPlotting import (
+    LOGIC_COLORS,
     plot_ground_states,
     plot_logic_map,
     plot_logic_fraction_map,
-    INPUT_COMBOS, LOGIC_NAMES, USEFUL_LOGIC, MAX_NEIGH, LOGIC_COLORS,
 )
 
-OUT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'results')
+os.makedirs(OUT_DIR, exist_ok=True)
 
 # Parse CLI arguments
 parser = argparse.ArgumentParser(description='MQCA test script')
@@ -53,250 +58,19 @@ args = parser.parse_args()
 PLOT_EXT = args.format
 
 # ======================================================================
-#  Cluster definitions
+#  Cluster definitions (imported from Ising_utils)
 # ======================================================================
-
-def make_cluster_T():
-    """
-    T-shaped 5-site cluster.
-
-       *  *  *     (0,1) (1,1) (2,1)
-          *           (1,0)
-          *           (1,-1)
-
-    input A: pad at (-1,1), neighbors site 0 (left tip)
-    input B: pad at (3, 1), neighbors site 2 (right tip)
-    output : site 3 (bottom stem)
-    """
-    positions = np.array([
-        [0,1],[1,1],[2,1],
-        [1,0],[1,-1],
-    ], dtype=int)
-    input_positions = [(-1, 1), (3, 1)]
-    input_neighbors = [[0], [2]]
-    output_site     = 4
-    return positions, input_positions, input_neighbors, output_site
-
-
-def make_cluster_T_extended_inputs():
-    """
-    T-shape with longer input lines (active cells on input arms).
-
-    Layout: A and B are now active sites, not external pads.
-    Input pads are further out, with 2-site input arms.
-
-        A_X_B    y=3: Pads at (-1,3) and (3,3), sites at (0,3), (2,3)
-        _X_X_    y=2: Sites (0,2), (2,2)
-        _XXX_    y=1: Crossbar (0,1),(1,1),(2,1)
-        __X__    y=0: Stem (1,0)
-        __O__    y=-1: Output (1,-1)
-    """
-    positions = np.array([
-        [0,3], [2,3],   # input arm sites (now part of cluster, sites 0,1)
-        [0,2], [2,2],   # middle of input arms (sites 2,3)
-        [0,1], [1,1], [2,1],  # crossbar (sites 4,5,6)
-        [1,0],          # stem (site 7)
-        [1,-1],         # output (site 8)
-    ], dtype=int)
-    input_positions = [(-1, 3), (3, 3)]  # external pads further out
-    input_neighbors = [[0], [1]]  # site 0 neighbors A pad, site 1 neighbors B pad
-    output_site = 8
-    return positions, input_positions, input_neighbors, output_site
-
-
-def make_cluster_T_extended_output():
-    """
-    T-shape with longer output line (2-site stem).
-
-        A_X_B    y=3: Pads at (-1,3), (3,3), sites (0,3),(2,3)
-        _XXX_    y=2: Crossbar (0,2),(1,2),(2,2)
-        __X__    y=1: Upper stem (1,1)
-        __X__    y=0: Lower stem (1,0)
-        __O__    y=-1: Output (1,-1)
-    """
-    positions = np.array([
-        [0,3], [2,3],   # under pads (sites 0,1)
-        [0,2], [1,2], [2,2],  # crossbar (sites 2,3,4)
-        [1,1],          # upper stem (site 5)
-        [1,0],          # lower stem (site 6)
-        [1,-1],         # output (site 7)
-    ], dtype=int)
-    input_positions = [(-1, 3), (3, 3)]
-    input_neighbors = [[0], [1]]
-    output_site = 7
-    return positions, input_positions, input_neighbors, output_site
-
-
-def make_cluster_T_no_center():
-    """
-    T-shape with central site removed (no site at cross-junction).
-
-        A_X_B    y=2: Pads at (-1,2),(3,2), sites (0,2),(2,2)
-        _X_X_    y=1: Arms only (0,1),(2,1) - NO CENTER
-        __X__    y=0: Stem (1,0)
-        __O__    y=-1: Output (1,-1)
-    """
-    positions = np.array([
-        [0,2], [2,2],   # under pads (sites 0,1)
-        [0,1], [2,1],   # arms only, no center (sites 2,3)
-        [1,0],          # stem (site 4)
-        [1,-1],         # output (site 5)
-    ], dtype=int)
-    input_positions = [(-1, 2), (3, 2)]
-    input_neighbors = [[0], [1]]
-    output_site = 5
-    return positions, input_positions, input_neighbors, output_site
-
-
-def make_cluster_T_fork():
-    """
-    Fork: Extended input arms + full crossbar + longer output.
-    The ASCII art from the request:
-        "A_B"    y=4: Pads at (0,4), (2,4)
-        "X_X"    y=3: Sites (0,3), (2,3)
-        "XXX"    y=2: Crossbar (0,2),(1,2),(2,2)
-        "_X_"    y=1: Upper stem (1,1)
-        "_O_"    y=0: Output (1,0)
-
-    Actually removing center means crossbar has gap at (1,2).
-    Correct fork: separate left/right arms that join at the stem.
-    """
-    positions = np.array([
-        [0,3], [2,3],   # under pads (sites 0,1)
-        [0,2], [2,2],   # crossbar arms, no center (sites 2,3)
-        [1,1],          # upper stem connecting them (site 4)
-        [1,0],          # output (site 5)
-    ], dtype=int)
-    input_positions = [(0, 4), (2, 4)]
-    input_neighbors = [[0], [1]]
-    output_site = 5
-    return positions, input_positions, input_neighbors, output_site
-
-
-def make_cluster_S():
-    """
-    S/Z-shaped 6-site cluster – asymmetric.
-
-       .  *  *     (1,2) (2,2)
-       *  *  .     (0,1) (1,1)
-       *  *  .     (0,0) (1,0)
-
-    input A: pad at (3,2), neighbors site 1 (top-right)
-    input B: pad at (-1,0), neighbors site 4 (bottom-left)
-    output : site 2 (mid-left)
-    """
-    positions = np.array([
-        [1,2],[2,2],
-        [0,1],[1,1],
-        [0,0],[1,0],
-    ], dtype=int)
-    input_positions = [(3, 2), (-1, 0)]
-    input_neighbors = [[1], [4]]
-    output_site     = 2
-    return positions, input_positions, input_neighbors, output_site
-
-
-def make_cluster_zigzag():
-    """
-    Zigzag 5-site cluster.
-
-    *  .  *  .  *
-    .  *  .  *  .
-
-    sites: (0,1)(1,0)(2,1)(3,0)(4,1)
-    input A: pad at (-1,1), neighbors site 0
-    input B: pad at (5, 1), neighbors site 4
-    output : site 2
-    """
-    positions = np.array([
-        [0,1],[1,0],[2,1],[3,0],[4,1]
-    ], dtype=int)
-    input_positions = [(-1, 1), (5, 1)]
-    input_neighbors = [[0], [4]]
-    output_site     = 2
-    return positions, input_positions, input_neighbors, output_site
-
-
-def make_cluster_L():
-    """
-    L-shaped 6-site cluster on a square grid.
-
-      I_A  .  .
-      *  *  *
-      *  *  I_B  (output = site 4, upper-right active)
-
-    Active site layout (grid coords):
-      0:(0,0)  1:(1,0)  2:(2,0)
-      3:(0,1)  4:(1,1)  5:(2,1)
-         ↑  ↑
-    input A: pad at (-1,0), neighbors site 0
-    input B: pad at (2,2),  neighbors site 5
-    output : site 4
-    """
-    positions = np.array([
-        [0,0],[1,0],[2,0],
-        [0,1],[1,1],[2,1],
-    ], dtype=int)
-    input_positions = [(-1, 0), (3, 1)]   # for plotting only
-    input_neighbors = [[0], [5]]           # which active sites each input biases
-    output_site     = 4
-    return positions, input_positions, input_neighbors, output_site
-
-
-def make_cluster_cross():
-    """
-    Cross / plus shaped 5-site cluster.
-
-         *          (2,2)
-      *  *  *    (1,1) (2,1) (3,1)
-         *          (2,0)
-
-    input A: pad at (2,3), neighbors site 4 (top)
-    input B: pad at (0,1), neighbors site 1 (left)
-    output : site 3 (right)
-    """
-    positions = np.array([
-        [2,0],          # 0 bottom
-        [1,1],[2,1],[3,1],  # 1 left, 2 centre, 3 right
-        [2,2],          # 4 top
-    ], dtype=int)
-    input_positions = [(2, 3), (0, 1)]
-    input_neighbors = [[4], [1]]
-    output_site     = 3
-    return positions, input_positions, input_neighbors, output_site
-
-
-def make_cluster_chain():
-    """
-    Simple 4-site horizontal chain.
-
-    I_A  *  *  *  *  I_B
-
-    sites: 0 1 2 3
-    input A biases site 0, input B biases site 3
-    output: site 1 or 2
-    """
-    positions = np.array([[i,0] for i in range(4)], dtype=int)
-    input_positions = [(-1, 0), (4, 0)]
-    input_neighbors = [[0], [3]]
-    output_site     = 2
-    return positions, input_positions, input_neighbors, output_site
-
-def make_cluster_straight_line_center():
-    """
-    5-site straight line with inputs on ends, output in center.
-
-    I_A  *  *  O  *  *  I_B
-
-    sites: 0 1 2 3 4
-    input A biases site 0, input B biases site 4
-    output: site 2 (center)
-    """
-    positions = np.array([[i,0] for i in range(5)], dtype=int)
-    input_positions = [(-1, 0), (5, 0)]
-    input_neighbors = [[0], [4]]
-    output_site     = 2
-    return positions, input_positions, input_neighbors, output_site
+make_cluster_T                   = CLUSTERS_FULL['T']
+make_cluster_T_extended_inputs   = CLUSTERS_FULL['T_extended_inputs']
+make_cluster_T_extended_output   = CLUSTERS_FULL['T_extended_output']
+make_cluster_T_no_center         = CLUSTERS_FULL['T_no_center']
+make_cluster_T_fork              = CLUSTERS_FULL['T_fork']
+make_cluster_S                   = CLUSTERS_FULL['S']
+make_cluster_zigzag              = CLUSTERS_FULL['Zigzag']
+make_cluster_L                   = CLUSTERS_FULL['L']
+make_cluster_cross               = CLUSTERS_FULL['Cross']
+make_cluster_chain               = CLUSTERS_FULL['Chain']
+make_cluster_straight_line_center = CLUSTERS_FULL['Straight_center']
 
 
 # ======================================================================
@@ -531,20 +305,7 @@ else:
     for i in np.where(diff_occ)[0][:3]:
         print(f"    Instance {i}: orig=0b{occ_orig[i]:09b}, permuted=0b{occ_unshuf[i]:09b}")
 
-# Python brute-force verification for single instance
-print(f"\n  Python brute-force verification:")
-def compute_energy_py(occ_mask, Esite, W_val, W_idx, nNeigh, nSite):
-    """Compute energy for a given occupancy mask (Python version)."""
-    E = 0.0
-    for i in range(nSite):
-        if not ((occ_mask >> i) & 1):
-            continue
-        E += Esite[i]
-        for k in range(nNeigh[i]):
-            j = W_idx[i, k]
-            if j < i and ((occ_mask >> j) & 1):  # j<i to count each pair once
-                E += W_val[i, k]
-    return E
+# Python brute-force verification (imported from Ising_utils)
 
 # Find ground state by brute force
 print(f"    Brute-forcing all 2^{ns_d}={1<<ns_d} states...")
@@ -799,8 +560,6 @@ for row, (name, (pos, inp_pos, inp_neigh, out_site)) in enumerate(clusters.items
     ax_use  = axes[row, 1]
 
     # phase diagram
-    import matplotlib.patches as mpatches
-    from IsingExactSolver import LOGIC_COLORS
     nW2_, nW1_ = lmap.shape
     img = np.zeros((nW2_, nW1_, 3))
     for code in range(16):
