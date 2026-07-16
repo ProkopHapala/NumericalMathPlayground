@@ -7,7 +7,7 @@ GPU-accelerated force fields and vibrational analysis. All OpenCL modules inheri
 - **UFF_cl.py** — PyOpenCL UFF runtime: bonds, angles, torsions, inversions, LJ + electrostatic non-bonded. Buffer management, kernel launch, force/energy retrieval. Also provides `make_uff_eval_fn` / `make_ff_eval_fn` — single-point `eval_fn(pos)→(E,F)` for finite-difference Hessians.
 - **UFFbuilder.py** — Converts `AtomicSystem` to UFF topology arrays: atom type assignment (trivial, nitro, aromatic ring detection, amide, conjugation, cumulene), bond order assignment, parameter assignment (vdW, bonds, angles, dihedrals, inversions).
 - **FFparams.py** — Force field parameter parsing: `SPFFparams` class loads `.dat` files (ElementTypes, AtomTypes, BondTypes, AngleTypes, DihedralTypes). `ElementType` records with RvdW, EvdW, Qbase, mass, color.
-- **Vibrations.py** — Normal-mode analysis: Hessian via finite differences (`hessian_fd_forces`), mass-weighted rigid-body projection, mass-normalized diagonalization, and frequency/mode extraction. `run_vibrations()` is the main entry point. Backends: `'uff'` (GPU finite difference), `'dftb'` (DFTB+ `SecondDerivatives`, optional).
+- **Vibrations.py** — Normal-mode analysis plus reusable reduced potentials: finite-difference Hessians, mass-weighted rigid projection, mass-normalized modes, and `ReducedPolynomialPotential` for scaled-coordinate cubic/quartic energy-force fits. `run_vibrations()` is the main mode-analysis entry point.
 - **VibrationPlot.py** — Top-view normal-mode figures: in-plane arrows + seismic z-circles. `make_mode_figure()`, `plot_mode_topview()`, `plot_softest_modes()`, `save_summary()`.
 
 ## Data flow

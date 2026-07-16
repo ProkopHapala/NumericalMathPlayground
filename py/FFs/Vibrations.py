@@ -11,6 +11,9 @@ Design:
   transformed back to Cartesian Hessian coordinates.
 - Returned physical modes satisfy ``U.T @ M @ U = I`` and frequencies are spectroscopic
   wavenumbers ``omega/(2*pi*c)``.
+- ``ReducedPolynomialPotential`` fits a local reduced-coordinate energy and its exact
+  analytic force gradient.  It is intended for anharmonic normal-coordinate/frame
+  models inside an explicitly stated trust region, not as a globally stable potential.
 
 - **Backends:** DFTB+ `SecondDerivatives`; UFF/SPFF via `FFEvaluator.make_ff_eval_fn` + central FD
 - **Entry point:** `run_vibrations(mol, backend=...)`
@@ -27,6 +30,7 @@ from __future__ import annotations
 import os
 import tempfile
 from dataclasses import dataclass
+from itertools import combinations_with_replacement
 from typing import Literal, Optional
 
 import numpy as np
@@ -139,6 +143,231 @@ class VibrationResult:
     def mode_freq_label(self, mode_index: int, unit: FreqUnit = 'cm-1') -> str:
         m = self.mode_info[mode_index]
         return f"{format_freq(m.freq_cm1, unit)} {FREQ_UNIT_LABELS[unit]}"
+
+
+def reduced_polynomial_powers(ndim: int, min_degree: int = 3, max_degree: int = 4) -> np.ndarray:
+    """Return unique monomial powers for total degrees ``min_degree..max_degree``.
+
+    A power row ``[2, 0, 1]`` represents ``z[0]**2 * z[2]``.  Enumerating
+    combinations with replacement is equivalent to storing fully symmetric cubic and
+    quartic tensors without duplicate permutation coefficients.
+    """
+    if ndim < 1 or min_degree < 0 or max_degree < min_degree:
+        raise ValueError(
+            f"invalid polynomial dimensions/degrees: ndim={ndim}, "
+            f"min_degree={min_degree}, max_degree={max_degree}"
+        )
+    powers = []
+    for degree in range(min_degree, max_degree + 1):
+        for indices in combinations_with_replacement(range(ndim), degree):
+            powers.append(np.bincount(indices, minlength=ndim))
+    return np.asarray(powers, dtype=np.int16)
+
+
+def _monomial_values_gradients(z: np.ndarray, powers: np.ndarray):
+    """Evaluate monomials and derivatives with respect to dimensionless ``z``."""
+    z = np.asarray(z, dtype=np.float64)
+    powers = np.asarray(powers, dtype=np.int16)
+    values = np.prod(z[:, None, :] ** powers[None, :, :], axis=2)
+    gradients = np.zeros((z.shape[0], powers.shape[0], z.shape[1]), dtype=np.float64)
+    for i in range(z.shape[1]):
+        active = powers[:, i] > 0
+        if not np.any(active):
+            continue
+        p = powers[active].copy()
+        prefactor = p[:, i].astype(np.float64)
+        p[:, i] -= 1
+        gradients[:, active, i] = prefactor[None, :] * np.prod(
+            z[:, None, :] ** p[None, :, :], axis=2
+        )
+    return values, gradients
+
+
+@dataclass
+class ReducedPolynomialPotential:
+    """Local reduced potential with an anchored harmonic Hessian.
+
+    ``coordinate_scale`` nondimensionalizes the reduced coordinates before evaluating
+    the higher-order monomials.  The stored coefficients therefore have energy units.
+    The model is a Taylor-like approximation around ``eta=0``; a quartic polynomial
+    with a negative homogeneous direction is not globally bounded and must only be
+    used inside its fitted coordinate range.
+    """
+
+    K: np.ndarray
+    coordinate_scale: np.ndarray
+    powers: np.ndarray
+    coefficients: np.ndarray
+
+    def __post_init__(self):
+        self.K = np.asarray(self.K, dtype=np.float64)
+        self.coordinate_scale = np.asarray(self.coordinate_scale, dtype=np.float64)
+        self.powers = np.asarray(self.powers, dtype=np.int16)
+        self.coefficients = np.asarray(self.coefficients, dtype=np.float64)
+        ndim = self.K.shape[0] if self.K.ndim == 2 else -1
+        if (
+            self.K.shape != (ndim, ndim)
+            or self.coordinate_scale.shape != (ndim,)
+            or self.powers.ndim != 2
+            or self.powers.shape[1] != ndim
+            or self.coefficients.shape != (self.powers.shape[0],)
+        ):
+            raise ValueError("incompatible reduced-polynomial model array shapes")
+        if np.any(self.coordinate_scale <= 0) or np.any(self.powers < 0):
+            raise ValueError("coordinate scales must be positive and monomial powers nonnegative")
+        if not all(np.all(np.isfinite(a)) for a in (self.K, self.coordinate_scale, self.coefficients)):
+            raise ValueError("reduced-polynomial model contains NaN or infinite values")
+        if not np.allclose(self.K, self.K.T, rtol=1e-10, atol=1e-12):
+            raise ValueError("harmonic anchor K must be symmetric")
+        self.K = 0.5 * (self.K + self.K.T)
+
+    def save_npz(self, path):
+        """Save the complete scaled-coordinate model without losing its basis contract."""
+        np.savez(
+            path,
+            K=np.asarray(self.K, dtype=np.float64),
+            coordinate_scale=np.asarray(self.coordinate_scale, dtype=np.float64),
+            powers=np.asarray(self.powers, dtype=np.int16),
+            coefficients=np.asarray(self.coefficients, dtype=np.float64),
+        )
+
+    @classmethod
+    def load_npz(cls, path):
+        """Load a model written by ``save_npz``."""
+        with np.load(path) as data:
+            return cls(
+                K=data['K'],
+                coordinate_scale=data['coordinate_scale'],
+                powers=data['powers'],
+                coefficients=data['coefficients'],
+            )
+
+    def energy_force(self, eta):
+        """Return model energy and conjugate force ``Q=-dV/deta``."""
+        eta = np.asarray(eta, dtype=np.float64)
+        scalar_input = eta.ndim == 1
+        eta_batch = eta[None, :] if scalar_input else eta
+        if eta_batch.ndim != 2 or eta_batch.shape[1] != self.K.shape[0]:
+            raise ValueError(f"eta must have shape ({self.K.shape[0]},) or (n,{self.K.shape[0]})")
+        z = eta_batch / self.coordinate_scale[None, :]
+        values, grad_z = _monomial_values_gradients(z, self.powers)
+        energy = 0.5 * np.einsum('ni,ij,nj->n', eta_batch, self.K, eta_batch)
+        energy += values @ self.coefficients
+        force = -(eta_batch @ self.K.T)
+        force -= np.einsum('ntd,t->nd', grad_z, self.coefficients) / self.coordinate_scale[None, :]
+        if scalar_input:
+            return float(energy[0]), force[0]
+        return energy, force
+
+    def error_metrics(self, samples) -> dict:
+        """Return energy and force errors for ``(eta, dE, Q)`` samples."""
+        eta = np.asarray([s[0] for s in samples], dtype=np.float64)
+        energy_ref = np.asarray([s[1] for s in samples], dtype=np.float64)
+        force_ref = np.asarray([s[2] for s in samples], dtype=np.float64)
+        energy, force = self.energy_force(eta)
+        de = energy - energy_ref
+        dq = force - force_ref
+        return {
+            'energy_rmse': float(np.sqrt(np.mean(de * de))),
+            'energy_max_abs': float(np.max(np.abs(de))),
+            'force_component_rmse': float(np.sqrt(np.mean(dq * dq))),
+            'force_vector_rms': float(np.sqrt(np.mean(np.sum(dq * dq, axis=1)))),
+            'force_max_abs': float(np.max(np.abs(dq))),
+        }
+
+    def homogeneous_direction_range(self, degree: int = 4, n_directions: int = 4096, seed: int = 123):
+        """Sample the homogeneous term on the dimensionless unit sphere."""
+        select = np.sum(self.powers, axis=1) == degree
+        if not np.any(select):
+            return 0.0, 0.0
+        rng = np.random.RandomState(seed)
+        z = rng.normal(size=(n_directions, self.K.shape[0]))
+        z /= np.linalg.norm(z, axis=1)[:, None]
+        values, _ = _monomial_values_gradients(z, self.powers[select])
+        directional = values @ self.coefficients[select]
+        return float(np.min(directional)), float(np.max(directional))
+
+
+def fit_reduced_polynomial(
+    samples,
+    K,
+    min_degree: int = 3,
+    max_degree: int = 4,
+    coordinate_scale=None,
+    ridge: float = 1e-8,
+):
+    """Fit higher-order energy and force residuals around a fixed harmonic ``K``.
+
+    The regression is linear in unique monomial coefficients.  Coordinates are scaled
+    to order unity, and the energy and force equation groups are RMS-normalized so six
+    force components do not automatically outweigh one energy observation.
+    """
+    if not samples:
+        raise ValueError("at least one sample is required")
+    if ridge < 0:
+        raise ValueError("ridge regularization must be nonnegative")
+    K = np.asarray(K, dtype=np.float64)
+    eta = np.asarray([s[0] for s in samples], dtype=np.float64)
+    energy = np.asarray([s[1] for s in samples], dtype=np.float64)
+    force = np.asarray([s[2] for s in samples], dtype=np.float64)
+    ndim = eta.shape[1]
+    if K.shape != (ndim, ndim) or force.shape != eta.shape:
+        raise ValueError(f"incompatible K/eta/force shapes: {K.shape}, {eta.shape}, {force.shape}")
+    if not all(np.all(np.isfinite(a)) for a in (K, eta, energy, force)):
+        raise ValueError("polynomial fit inputs contain NaN or infinite values")
+    if coordinate_scale is None:
+        coordinate_scale = np.max(np.abs(eta), axis=0)
+    coordinate_scale = np.asarray(coordinate_scale, dtype=np.float64)
+    if coordinate_scale.shape != (ndim,) or np.any(coordinate_scale <= 0):
+        raise ValueError("coordinate_scale must be positive and have one entry per coordinate")
+
+    powers = reduced_polynomial_powers(ndim, min_degree=min_degree, max_degree=max_degree)
+    z = eta / coordinate_scale[None, :]
+    values, grad_z = _monomial_values_gradients(z, powers)
+    harmonic_energy = 0.5 * np.einsum('ni,ij,nj->n', eta, K, eta)
+    harmonic_force = -(eta @ K.T)
+    energy_residual = energy - harmonic_energy
+    force_residual = force - harmonic_force
+
+    energy_scale = max(float(np.sqrt(np.mean(energy_residual ** 2))), 1e-12)
+    force_scale = max(float(np.sqrt(np.mean(force_residual ** 2))), 1e-12)
+    force_features = -grad_z / coordinate_scale[None, None, :]
+    group_balance = np.sqrt(ndim)
+    A = np.vstack([
+        values / energy_scale,
+        force_features.transpose(0, 2, 1).reshape(-1, powers.shape[0]) / (force_scale * group_balance),
+    ])
+    b = np.concatenate([
+        energy_residual / energy_scale,
+        force_residual.reshape(-1) / (force_scale * group_balance),
+    ])
+
+    degrees = np.sum(powers, axis=1)
+    ridge_weights = ridge * (degrees / max(min_degree, 1)) ** 2
+    A_aug = np.vstack([A, np.diag(np.sqrt(ridge_weights))])
+    b_aug = np.concatenate([b, np.zeros(powers.shape[0])])
+    coefficients, _, _, _ = np.linalg.lstsq(A_aug, b_aug, rcond=None)
+    data_singular = np.linalg.svd(A, compute_uv=False)
+    rank_tol = np.finfo(np.float64).eps * max(A.shape) * data_singular[0]
+    data_rank = int(np.count_nonzero(data_singular > rank_tol))
+    model = ReducedPolynomialPotential(
+        K=0.5 * (K + K.T),
+        coordinate_scale=coordinate_scale,
+        powers=powers,
+        coefficients=coefficients,
+    )
+    diagnostics = {
+        'n_terms': int(powers.shape[0]),
+        'rank': data_rank,
+        'condition': (
+            float(data_singular[0] / data_singular[data_rank-1])
+            if data_rank == powers.shape[0] else float('inf')
+        ),
+        'energy_scale': energy_scale,
+        'force_scale': force_scale,
+        'ridge': float(ridge),
+    }
+    return model, diagnostics
 
 
 def atomic_masses(enames) -> np.ndarray:

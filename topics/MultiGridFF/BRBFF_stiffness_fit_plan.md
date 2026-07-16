@@ -666,8 +666,9 @@ def compare_stiffness_frequencies(K_galerkin, K_spectral, K_relax, K_edge, masse
 
 **8c — Force matching (primary mechanics validation):**
 
-For each method, apply a known frame displacement ξ, compute `Q_pred = -S^T K S ξ`,
-and compare against UFF generalized forces `Q_uff` obtained from `atom_to_frame_forces()`.
+For each restricted method, apply a known frame displacement, compute `eta = S ξ` and
+`Q_pred = -K_eta eta`, and compare against UFF virtual-work forces transformed into eta
+coordinates.  `Relaxed` is a separate static-condensation target.
 Report RMS force residual per method.
 
 ### Step 9: Plot comparison
@@ -677,7 +678,11 @@ Reuse matplotlib pattern from `blended_rigid_frames.py`.
 
 ---
 
-## File Structure
+## File Structure (original implementation plan)
+
+> This section records the initial one-script design.  The current implementation also
+> adds the reusable `ReducedPolynomialPotential` and fitting utilities to
+> `py/FFs/Vibrations.py`; the corrected results below are authoritative.
 
 **Single new file:** `topics/MultiGridFF/fit_stiffness.py`
 
@@ -759,10 +764,12 @@ plot comparison  [NEW, ~30 lines]
 
 ---
 
-## What NOT to Implement (Yet)
+## Original deferred scope (historical)
+
+> These were the initial exclusions.  The current status is given in the corrected results and TODO sections below.
 
 - Weight optimization (FIRE/Adam/BFGS) — weights are fixed for now
-- Anharmonic potential fitting (quartic, cos terms) — start with harmonic
+- Anharmonic potential fitting (quartic, cos terms) — cubic/quartic restricted fitting is now implemented; cosine terms remain deferred
 - Multi-frame (K>2) generalization — start with K=2
 - Dual-quaternion or SE(3) nonlinear interpolation — use linear blend for position reconstruction
 - Graph biharmonic weights — geometric weights are sufficient
@@ -963,4 +970,20 @@ The spectral target has numerical rank **4/6**: two UFF low-mode directions have
 2. Add three or more frames, or append residual internal modes, and re-measure principal angles/rank before fitting more parameters.
 3. Optimize blending weights against the mass-weighted low-mode subspace; the current smoothstep weights are geometric, not learned.
 4. Replace diagnostic finite-difference geometry Jacobians with an analytic SE(3) Jacobian in a production implementation.
-5. Decide whether finite-temperature/environment-dependent corrections or explicit quartic terms are needed for the intended use.
+5. Make the fitted quartic globally stable, or enforce its eta trust region during dynamics.
+6. Decide whether finite-temperature/environment-dependent corrections are needed for the intended use.
+7. Evaluate geodesic SE(3) interpolation before dual-quaternion blending; both change the nonlinear reduced manifold.
+8. Revisit graph biharmonic weights only after multi-frame experiments and with explicit positivity/partition-of-unity checks.
+
+### Implemented local anharmonic extension (2026-07-16)
+
+The restricted model now keeps the exact Galerkin quadratic term and fits all unique cubic and quartic monomials in the scaled coordinate `z = eta / eta_scale`.  This adds 56 cubic and 126 quartic coefficients.  Energy and analytic generalized-force equations are fitted together; paired positive/negative samples improve separation of odd and even terms, and ridge strength is selected on an independent validation set.
+
+| Model | Held-out energy RMSE | Held-out force-component RMSE |
+|---|---:|---:|
+| Galerkin harmonic | 1.501e-3 eV | 9.852e-3 eV/Å |
+| Cubic + quartic | 1.990e-5 eV | 1.372e-4 eV/Å |
+
+The fitted analytic force agrees with the finite-difference gradient of its own energy to `3.6e-10 eV/Å`.  The 182-column regression has full rank and condition number about 25.7 after scaling.  The complete model is written to `debug/fit_stiffness/anharmonic_model.npz`; coefficients cannot be interpreted without the stored coordinate scales.
+
+The sampled homogeneous quartic range includes a small negative direction (about `-1.0e-5 eV` on the dimensionless unit sphere).  Therefore the result is a local Taylor-like approximation over the fitted box (translations about ±0.20 Å and rotations about ±0.020 rad), not a globally bounded potential.  Cosine terms were not added: periodic rotational fitting should be considered only after choosing a global SE(3) interpolation and a physically meaningful large-rotation training domain.
