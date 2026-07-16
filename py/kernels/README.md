@@ -10,6 +10,7 @@ OpenCL source files for GPU-accelerated force field calculations. Python harness
 | `Forces.cl` | Inline pairwise potentials (LJ, Morse, Coulomb) | all force modules |
 | `UFF.cl` | UFF bonding: bonds, angles, dihedrals, inversions, force assembly | `FFs/UFF_cl.py` |
 | `rigid.cl` | 6-DOF rigid body dynamics with quaternion integration | (not currently used) |
+| `BRBFFF.cl` | Two-frame molecular skinning and atom-force-to-frame-wrench projection | `FFs/BRBFFF.py` |
 
 ## Composition rules
 
@@ -66,3 +67,9 @@ Universal Force Field (Rappé et al.): harmonic bonds, cosine angle bending, tor
 ## rigid.cl
 
 6-DOF rigid-body MD: 3 translational + 3 rotational (quaternion) DOFs per body. Quaternion integration uses exact exponential map with Taylor-series `sinc`/`cosc` for small-angle stability. Not currently wired into any Python module in this repo.
+
+---
+
+## BRBFFF.cl
+
+Three standalone kernels operate on a batch of molecules with one shared atom template and two weighted quaternion frames.  `brbfff_reconstruct_positions` writes the skinned atom geometry.  A compatible external potential writes atom forces into the persistent `atom_force` buffer, then `brbfff_project_atomic_forces` uses one workgroup per system and local-memory reductions to output frame-origin forces and torques.  `brbfff_relax_step` applies a capped, overdamped update directly in those pose coordinates and renormalizes every quaternion.  It uses no atomics.  This is relaxation, not a claim of physically accurate inertial MD: masses are unnecessary for a relaxed structure, while energy backtracking still requires an external energy evaluator.  It also has no internal molecular potential yet; a standalone distorted molecule therefore has no GPU restoring force until that term is ported.

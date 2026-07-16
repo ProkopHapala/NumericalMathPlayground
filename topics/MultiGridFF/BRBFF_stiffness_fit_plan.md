@@ -970,7 +970,7 @@ The spectral target has numerical rank **4/6**: two UFF low-mode directions have
 2. Add three or more frames, or append residual internal modes, and re-measure principal angles/rank before fitting more parameters.
 3. Optimize blending weights against the mass-weighted low-mode subspace; the current smoothstep weights are geometric, not learned.
 4. Replace diagnostic finite-difference geometry Jacobians with an analytic SE(3) Jacobian in a production implementation.
-5. Make the fitted quartic globally stable, or enforce its eta trust region during dynamics.
+5. Replace sampled quartic stabilization with a formal global-positivity construction before allowing unbounded-domain relaxation or dynamics; retain/reject the eta trust box at runtime.
 6. Decide whether finite-temperature/environment-dependent corrections are needed for the intended use.
 7. Evaluate geodesic SE(3) interpolation before dual-quaternion blending; both change the nonlinear reduced manifold.
 8. Revisit graph biharmonic weights only after multi-frame experiments and with explicit positivity/partition-of-unity checks.
@@ -987,3 +987,37 @@ The restricted model now keeps the exact Galerkin quadratic term and fits all un
 The fitted analytic force agrees with the finite-difference gradient of its own energy to `3.6e-10 eV/Å`.  The 182-column regression has full rank and condition number about 25.7 after scaling.  The complete model is written to `debug/fit_stiffness/anharmonic_model.npz`; coefficients cannot be interpreted without the stored coordinate scales.
 
 The sampled homogeneous quartic range includes a small negative direction (about `-1.0e-5 eV` on the dimensionless unit sphere).  Therefore the result is a local Taylor-like approximation over the fitted box (translations about ±0.20 Å and rotations about ±0.020 rad), not a globally bounded potential.  Cosine terms were not added: periodic rotational fitting should be considered only after choosing a global SE(3) interpolation and a physically meaningful large-rotation training domain.
+
+### Implemented bounded reduced relaxation (2026-07-16)
+
+For relaxation, the raw least-squares polynomial is no longer the default exported model.  Its sampled quartic minimum was negative, so the runtime export adds an isotropic dimensionless term
+
+\[
+  \lambda\left\|\eta/\eta_{\rm scale}\right\|^4,
+\]
+
+with λ chosen from a random unit-sphere scan plus a safety margin.  In the current PTCDA fit the scan changes from approximately `[-1.18e-5, 4.32e-5] eV` to `[1.29e-6, 5.62e-5] eV`, using `lambda = 1.31e-5 eV`.  The raw model remains available as `anharmonic_model_local.npz` for regression analysis; `anharmonic_model.npz` is the stabilized model intended for bounded reduced relaxation.
+
+The solver minimizes (V(\eta)-f_{\rm ext}^T\eta) with an eta-coordinate trust box.  It uses a bounded energy minimization followed by an interior force-balance polish.  A load path is continued from the preceding equilibrium rather than re-started from zero.  Six test paths load each coordinate to half its fitted scale and unload it again; replaying the serialized stabilized model produces no boundary hits, returns to the origin, and has maximum residual below `1e-15 eV/Å`.
+
+This is an **operational stability contract**, not a claim that the quartic is globally positive: the direction scan is finite, the trust box is essential, and a `hit_boundary` result must be treated as outside the model domain.  The stabilized model modestly degrades held-out local accuracy (energy RMSE `6.18e-5 eV`, force-component RMSE `4.45e-4 eV/Å`) relative to the raw regression, while keeping the Galerkin Hessian and its positive local curvature unchanged.
+
+The most important missing physics remains constrained atomistic relaxation.  Present load paths minimize only the six-coordinate fitted potential, so they establish stable *reduced* mechanics—not the fully relaxed UFF compliance under an external Cartesian load.
+
+### Implemented force-projected two-frame dynamics (2026-07-16)
+
+The reduced model can now be driven by atom-level external interactions.  It stores two absolute SE(3) frame poses (12 moving coordinates), reconstructs atom positions by the same partition-of-unity skinning map used in fitting, and evaluates the instantaneous position Jacobian (J=\partial r/\partial q_{\rm frame}).  Atomic forces from any conservative external evaluator are transferred by
+
+\[
+Q_{\rm ext}=J^T F_{\rm atom}, \qquad M_{\rm frame}=J^T M_{\rm atom}J.
+\]
+
+The relative potential contributes (J_\eta^T Q_\eta), so global translation/rotation remain free while relative translation, bending, and twisting are restored.  This is the same work-preserving principle as skeletal skinning, but with a physical projected mass matrix rather than animation-only control coordinates.
+
+`relax_step()` is the mechanically safe entry point: it uses a mass-preconditioned projected force and accepts only an energy-decreasing step when the external evaluator returns energy.  `step_velocity_verlet()` supports damped local motion in femtoseconds and caps implied atom displacement.  PTCDA validation gives full-frame virtual-work error `5.6e-12`, while a damped bend/twist trajectory falls from `4.24e-4` to `3.76e-4 eV` without overshoot.  This is suitable for smoothened mechanics and damped relaxation, not yet a claim of long-time NVE conservation: both SE(3) Jacobians are finite-differenced and the inertial step omits configuration-dependent-mass connection terms.
+
+### Experimental GPU force bridge (2026-07-16)
+
+`py/FFs/BRBFFF.py` and `py/kernels/BRBFFF.cl` now make the external atom-side part of the relaxation loop buffer-resident on OpenCL.  They reconstruct weighted two-frame positions from quaternion poses, expose the resulting `atom_pos` buffer to an external GPU interaction, reduce the interaction's `atom_force` buffer to two frame-origin forces and torques using local-memory workgroup reductions, and apply a capped overdamped update.  This is the GPU form of (Q=J^TF), not a fitted approximation.  It needs no physical masses for relaxation; an energy-returning external evaluator is only needed when strict backtracking is desired.
+
+The GPU stage now includes a frame update, but it remains incomplete as a standalone molecular relaxer: it does **not** evaluate the fitted nonlinear relative-pose potential or add its restoring generalized force.  An isolated distorted molecule will therefore move only if its `atom_force` buffer contains an intrinsic molecular force.  Porting the stabilized reduced potential and exposing the combined total energy for device-side or host-side backtracking are the next essential steps.  The full mass (J^TMJ) is unnecessary for overdamped relaxation but remains needed for physically interpretable inertial dynamics.  GPU/CPU parity must be executed when a working OpenCL compiler is available; the present environment's NVIDIA driver is unavailable and its PoCL compiler fails even a trivial kernel.
