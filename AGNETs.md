@@ -53,3 +53,9 @@ Every topic must split code into three layers.
 - **Clean Interfaces.** Use default named arguments to avoid long call strings. Group related state into structs/dicts or classes.
 - **Compact Layout.** Prefer compact code; avoid excessive blank lines. Assume infinite line width; do not wrap expressions in ways that hurt readability.
 - **Naming & Comments.** Use short, clear names for math symbols (`E_tot`, `T_ij`, `m_i`). Comments explain the non-obvious: assumptions, intent, mental models, and the theory or derivation behind the code. Supplement with equations where helpful. Good code is concise and self-explanatory; do not waste space stating the obvious or comment every line like an elementary-school exercise. Place inline comments behind the line.
+
+## Rule 7 — Output Location
+
+- **All generated outputs** (plots, .xyz files, logs, debug artifacts) go to `debug/` — never to source directories.
+- `debug/` is gitignored. This keeps the repo clean while making results inspectable.
+- Scripts should default to `debug/` for any output path.
