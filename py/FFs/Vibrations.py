@@ -6,6 +6,12 @@ floating molecules in the GUI where translations/rotations would otherwise appea
 near-zero "vibrations". In-plane vs out-of-plane classification uses displacement
 energy fractions in the lab xy/z axes (suited to planar adsorbates on z≈0).
 
+Design:
+- Rigid projection is performed in the mass-weighted dynamical-matrix space and then
+  transformed back to Cartesian Hessian coordinates.
+- Returned physical modes satisfy ``U.T @ M @ U = I`` and frequencies are spectroscopic
+  wavenumbers ``omega/(2*pi*c)``.
+
 - **Backends:** DFTB+ `SecondDerivatives`; UFF/SPFF via `FFEvaluator.make_ff_eval_fn` + central FD
 - **Entry point:** `run_vibrations(mol, backend=...)`
 - **Units:** internal SSOT is cm⁻¹; display via `freq_cm1_to_unit` (meV, THz, kcal/mol)
@@ -176,15 +182,27 @@ def rigid_body_basis(pos, masses):
 
 
 def project_rigid_modes(hessian, pos, masses):
-    """Remove translation/rotation: H' = P H P, P = I - Q Q^T."""
-    Q = rigid_body_basis(pos, masses)
-    P = np.eye(hessian.shape[0]) - Q @ Q.T
-    Hp = P @ hessian @ P
-    return 0.5 * (Hp + Hp.T), P
+    """Remove rigid motion in mass-weighted space; return Cartesian ``H'`` and projector.
+
+    ``rigid_body_basis`` returns vectors in ``y=M**1/2 x`` coordinates.  Applying its
+    Euclidean projector directly to the Cartesian Hessian mixes coordinate systems.
+    Here ``P_mw`` projects the dynamical matrix, while ``P_phys`` is the corresponding
+    mass-orthogonal projector acting on Cartesian displacements.
+    """
+    masses = np.asarray(masses, dtype=np.float64)
+    sqrt_m = np.repeat(np.sqrt(masses), 3)
+    inv_sqrt_m = 1.0 / sqrt_m
+    Q_mw = rigid_body_basis(pos, masses)
+    P_mw = np.eye(hessian.shape[0]) - Q_mw @ Q_mw.T
+    D = inv_sqrt_m[:, None] * hessian * inv_sqrt_m[None, :]
+    Dp = P_mw @ D @ P_mw
+    Hp = sqrt_m[:, None] * Dp * sqrt_m[None, :]
+    P_phys = inv_sqrt_m[:, None] * P_mw * sqrt_m[None, :]
+    return 0.5 * (Hp + Hp.T), P_phys
 
 
 def hessian_to_modes(hessian, masses):
-    """Diagonalize mass-weighted Hessian. Returns freq_cm1 (n_modes,), modes (3N, n_modes) physical."""
+    """Diagonalize a Cartesian Hessian; return cm⁻¹ and mass-normalized physical modes."""
     masses = np.asarray(masses, dtype=np.float64)
     im = np.repeat(masses ** -0.5, 3)
     D = im[:, None] * hessian * im[None, :]
@@ -193,13 +211,11 @@ def hessian_to_modes(hessian, masses):
     amu_to_kg = 1.66053906660e-27
     ang_to_m = 1e-10
     c_cm = 2.99792458e10
-    omega = np.sqrt(np.maximum(omega2, 0.0) * eV_to_J / (amu_to_kg * ang_to_m ** 2))
-    freq_cm1 = omega / c_cm
-    # imaginary modes: mark negative
-    freq_cm1 = np.where(omega2 < 0, -omega / c_cm, freq_cm1)
+    omega_abs = np.sqrt(np.abs(omega2) * eV_to_J / (amu_to_kg * ang_to_m ** 2))
+    freq_cm1 = np.sign(omega2) * omega_abs / (2.0 * np.pi * c_cm)
     modes_phys = im[:, None] * eigvec_mw
     for k in range(modes_phys.shape[1]):
-        norm = np.linalg.norm(modes_phys[:, k])
+        norm = np.sqrt(np.sum(np.repeat(masses, 3) * modes_phys[:, k] ** 2))
         if norm > 0:
             modes_phys[:, k] /= norm
     return freq_cm1, modes_phys
