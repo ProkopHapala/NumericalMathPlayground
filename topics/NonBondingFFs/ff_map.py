@@ -92,6 +92,8 @@ for row in ELEMENTS:
     ELEM_SIZES[name] = rvdw * 6  # scale vdW radius for plotting
 ELEM_COLORS['E'] = '#00FF00'  # electron pairs: lime green
 ELEM_SIZES['E'] = 4
+ELEM_COLORS['Sh'] = '#FF00FF'  # sigma holes: magenta
+ELEM_SIZES['Sh'] = 4
 
 # ---- Forcefield backends ----
 
@@ -104,7 +106,8 @@ def get_REQs(mol, atom_types, type_map=None):
 
 def compute_ff_map(mol, REQs, probe_ename, probe_q, z_height=0.0,
                    margin=4.0, step=0.1, ff_type='morseQ', R2damp=1.0,
-                   atom_types=None):
+                   atom_types=None, He=0.0, rc=3.0, w=1.0, Hs=0.0, sigma_dist=1.0,
+                   probe_R_override=None):
     """Compute 2D energy map over a grid in the molecular plane (z=0).
 
     Args:
@@ -135,6 +138,8 @@ def compute_ff_map(mol, REQs, probe_ename, probe_q, z_height=0.0,
         probe_REQ[0] = at.RvdW
         probe_REQ[1] = np.sqrt(at.EvdW)
         probe_REQ[3] = at.Hb
+    if probe_R_override is not None:
+        probe_REQ[0] = probe_R_override
     probe_REQ[2] = probe_q  # charge set by user
 
     # Precompute mixed REQs for all atoms (broadcast mixing)
@@ -165,6 +170,88 @@ def compute_ff_map(mol, REQs, probe_ename, probe_q, z_height=0.0,
     elif ff_type == 'morse':
         e_exp = np.exp(-MORSE_BETA * (r - REQs_mixed[None, None, :, 0]))
         Emap = (REQs_mixed[None, None, :, 1] * (e_exp*e_exp - 2.0*e_exp)).sum(axis=2)
+    elif ff_type in ('morseH', 'morseH_only', 'Honly', 'morseH_amb'):
+        # Hbond correction from epairs: Eie = min(0, Qj*He) * fcut(r,rc) * lorenc(r,w)
+        ep_mask = np.array([e == 'E' for e in mol.enames])
+        ep_indices = np.where(ep_mask)[0]
+        E_hbond = np.zeros((ny, nx))
+        if len(ep_indices) > 0 and He != 0:
+            ep_pos = apos[ep_indices]
+            dx_ep = X[:, :, None] - ep_pos[None, None, :, 0]
+            dy_ep = Y[:, :, None] - ep_pos[None, None, :, 1]
+            dz_ep = z_height - ep_pos[None, None, :, 2]
+            r_ep = np.sqrt(dx_ep*dx_ep + dy_ep*dy_ep + dz_ep*dz_ep)
+            x_cut = np.clip(1.0 - r_ep/rc, 0, 1)
+            fcut = 3*x_cut**2 - 2*x_cut**3
+            lorenc = 1.0 / (w*w + r_ep*r_ep)
+            coeff = min(0.0, probe_q * He)
+            E_hbond = coeff * (fcut * lorenc).sum(axis=2)
+        # Sigma hole correction: positive pseudo-charge on S dummy atoms (H bonded to O/N)
+        # Esi = min(0, Qj*Hs) * fcut(r,rc) * lorenc(r,w) per sigma hole
+        E_sigma = np.zeros((ny, nx))
+        if Hs != 0:
+            sigma_mask = np.array([e == 'Sh' for e in mol.enames])
+            sigma_indices = np.where(sigma_mask)[0]
+            if len(sigma_indices) > 0:
+                sp = apos[sigma_indices]
+                dx_s = X[:, :, None] - sp[None, None, :, 0]
+                dy_s = Y[:, :, None] - sp[None, None, :, 1]
+                dz_s = z_height - sp[None, None, :, 2]
+                r_s = np.sqrt(dx_s*dx_s + dy_s*dy_s + dz_s*dz_s)
+                x_cut_s = np.clip(1.0 - r_s/rc, 0, 1)
+                fcut_s = 3*x_cut_s**2 - 2*x_cut_s**3
+                lorenc_s = 1.0 / (w*w + r_s*r_s)
+                coeff_s = min(0.0, probe_q * Hs)
+                E_sigma = coeff_s * (fcut_s * lorenc_s).sum(axis=2)
+        E_corr = E_hbond + E_sigma
+        if ff_type == 'morseH_amb':
+            # Ambivalent probe: Morse + Hbond (both epair and sigma attractive), no Coulomb
+            e_exp = np.exp(-MORSE_BETA * (r - REQs_mixed[None, None, :, 0]))
+            E_morse = REQs_mixed[None, None, :, 1] * (e_exp*e_exp - 2.0*e_exp)
+            # Recompute Hbond with abs(probe_q) so both interactions are attractive
+            E_hbond_amb = np.zeros((ny, nx))
+            if len(ep_indices) > 0 and He != 0:
+                coeff_amb = min(0.0, abs(probe_q) * He)  # He<0, abs>0 → always attractive
+                E_hbond_amb = coeff_amb * (fcut * lorenc).sum(axis=2)
+            E_sigma_amb = np.zeros((ny, nx))
+            if Hs != 0 and len(sigma_indices) > 0:
+                coeff_s_amb = min(0.0, -abs(probe_q) * Hs)  # Hs>0, -abs<0 → always attractive
+                E_sigma_amb = coeff_s_amb * (fcut_s * lorenc_s).sum(axis=2)
+            Emap = E_morse.sum(axis=2) + E_hbond_amb + E_sigma_amb
+        elif ff_type == 'morseH':
+            # Morse + CoulombDipole + Hbond correction
+            e_exp = np.exp(-MORSE_BETA * (r - REQs_mixed[None, None, :, 0]))
+            E_morse = REQs_mixed[None, None, :, 1] * (e_exp*e_exp - 2.0*e_exp)
+            E_coul = COULOMB_CONST * REQs_mixed[None, None, :, 2] / np.sqrt(r2 + R2damp)
+            E_primary = (E_morse + E_coul).sum(axis=2)
+            # Dipole compensating charge along repulsion direction
+            R0_mix = probe_REQ[0] + REQs[:, 0]
+            E0_mix = probe_REQ[1] * REQs[:, 1]
+            e2 = np.exp(-2*MORSE_BETA * (r - R0_mix[None, None, :]))
+            coeff_d = 2*MORSE_BETA * E0_mix[None, None, :] * e2
+            ir = 1.0/np.where(r > 1e-10, r, 1e-10)
+            Fx = (coeff_d * dx * ir).sum(axis=2)
+            Fy = (coeff_d * dy * ir).sum(axis=2)
+            Fz = (coeff_d * dz * ir).sum(axis=2)
+            Fmag = np.sqrt(Fx**2 + Fy**2 + Fz**2)
+            Fmag_safe = np.where(Fmag > 1e-10, Fmag, 1.0)
+            cx = X + 1.0 * Fx / Fmag_safe
+            cy = Y + 1.0 * Fy / Fmag_safe
+            cz = z_height + 1.0 * Fz / Fmag_safe
+            q_comp = -probe_q
+            Q_prod_comp = q_comp * REQs[:, 2]
+            dcx = cx[:, :, None] - apos[None, None, :, 0]
+            dcy = cy[:, :, None] - apos[None, None, :, 1]
+            dcz = cz[:, :, None] - apos[None, None, :, 2]
+            rc2 = dcx*dcx + dcy*dcy + dcz*dcz
+            E_comp = (COULOMB_CONST * Q_prod_comp[None, None, :] / np.sqrt(rc2 + R2damp)).sum(axis=2)
+            Emap = E_primary + E_comp + E_corr
+        elif ff_type == 'morseH_only':
+            e_exp = np.exp(-MORSE_BETA * (r - REQs_mixed[None, None, :, 0]))
+            E_morse = REQs_mixed[None, None, :, 1] * (e_exp*e_exp - 2.0*e_exp)
+            Emap = E_morse.sum(axis=2) + E_corr
+        elif ff_type == 'Honly':
+            Emap = E_corr
     elif ff_type == 'morseD':
         # Morse + CoulombDipole: primary particle (Morse+Coulomb) + compensating charge (Coulomb only)
         # at 1.0A along normalized repulsion direction. Net charge = 0.
@@ -259,12 +346,37 @@ def compute_rep_force_map(mol, REQs, probe_ename, probe_q, z_height=0.0,
 
 # ---- Plotting ----
 
-FF_LABELS = {'morseQ': 'Morse+Coulomb', 'coulomb': 'Coulomb', 'morse': 'Morse', 'morseD': 'Morse+CoulDipole'}
+FF_LABELS = {'morseQ': 'Morse+Coulomb', 'coulomb': 'Coulomb', 'morse': 'Morse',
+             'morseD': 'Morse+CoulDipole', 'morseH': 'Morse+CoulDip+Hbond',
+             'morseH_only': 'Morse+Hbond', 'Honly': 'Hbond only',
+             'morseH_amb': 'Morse+Hbond(ambivalent)'}
 
-def plot_atom_overlay(ax, mol, atom_Rs=None, probe_R=None):
-    """Draw atoms (colored by element), charge labels, vdW circles, and bonds on ax."""
+def add_sigma_holes(mol, sigma_dist=1.4):
+    """Add sigma hole dummy atoms (type 'Sh') to mol: sigma_dist from H bonded to O/N, along bond direction outward."""
+    apos = mol.apos
+    n_before = len(mol.enames)
+    for i, e in enumerate(mol.enames):
+        if e != 'H':
+            continue
+        for j in mol.ngs[i]:
+            if mol.enames[j] in ('O', 'N'):
+                direction = apos[i] - apos[j]
+                norm = np.linalg.norm(direction)
+                if norm > 1e-10:
+                    mol.place_electron_pair(i, direction / norm, distance=sigma_dist, ename='Sh')
+                break
+    n_after = len(mol.enames)
+    print(f"Added {n_after - n_before} sigma holes at distance {sigma_dist} Å")
+    return mol
+
+def plot_atom_overlay(ax, mol, atom_Rs=None, probe_R=None, epair_rc=None,
+                      vdw_circles=True, contact_circles=False, probe_q=0.0):
+    """Draw atoms (colored by element), charge labels, vdW circles, and bonds on ax.
+    Hbond circles shown selectively: epair (green) for donor probe (q>0), sigma hole (magenta) for acceptor probe (q<0)."""
     from matplotlib.patches import Circle
     from matplotlib.collections import LineCollection
+    show_epair = probe_q > 0   # donor probe interacts with acceptor epairs
+    show_sigma = probe_q < 0   # acceptor probe interacts with donor sigma holes
     for i, e in enumerate(mol.enames):
         x, y = mol.apos[i, 0], mol.apos[i, 1]
         q = mol.qs[i] if i < len(mol.qs) else 0.0
@@ -273,24 +385,31 @@ def plot_atom_overlay(ax, mol, atom_Rs=None, probe_R=None):
         ax.plot(x, y, 'o', color=color, markersize=size, markeredgecolor='gray')
         text_color = 'white' if e in ('C', 'O', 'N') else 'black'
         ax.text(x, y, f'{q:+.1f}', fontsize=6, ha='center', va='center', color=text_color)
-        if atom_Rs is not None:
+        if atom_Rs is not None and vdw_circles:
             Ri = atom_Rs[i]
             ax.add_patch(Circle((x, y), Ri, fill=False, edgecolor=color, linewidth=0.5, alpha=0.4))
-            if probe_R is not None:
-                ax.add_patch(Circle((x, y), Ri + probe_R, fill=False, edgecolor='gray', linewidth=0.5, linestyle='--', alpha=0.3))
+        if atom_Rs is not None and contact_circles and probe_R is not None:
+            Ri = atom_Rs[i]
+            ax.add_patch(Circle((x, y), Ri + probe_R, fill=False, edgecolor='gray', linewidth=0.5, linestyle='--', alpha=0.3))
+        if e == 'E' and epair_rc is not None and show_epair:
+            ax.add_patch(Circle((x, y), epair_rc, fill=False, edgecolor='#00AA00', linewidth=0.8, alpha=0.35))
+        if e == 'Sh' and epair_rc is not None and show_sigma:
+            ax.add_patch(Circle((x, y), epair_rc, fill=False, edgecolor='#FF00FF', linewidth=0.8, alpha=0.35))
     if mol.bonds is not None:
         segs = [[[mol.apos[i, 0], mol.apos[i, 1]], [mol.apos[j, 0], mol.apos[j, 1]]]
                 for i, j in mol.bonds]
         ax.add_collection(LineCollection(segs, colors='k', linewidths=1.0, alpha=0.5))
 
 def plot_ff_panel(ax, Emap, extent, mol, probe_ename, probe_q, ff_type,
-                  z_height=0.0, atom_Rs=None, probe_R=None, title_suffix=""):
+                  z_height=0.0, atom_Rs=None, probe_R=None, title_suffix="", epair_rc=None,
+                  vdw_circles=True, contact_circles=False):
     """Plot a single ff map panel onto given ax. Symmetric colorscale: vmin=-vmax=|Emin|."""
     vmax = max(abs(Emap.min()), 0.01)
     im = ax.imshow(Emap, origin='lower', extent=extent, aspect='equal', cmap='RdBu_r',
                    vmin=-vmax, vmax=vmax)
     plt.colorbar(im, ax=ax, label='Energy [eV]')
-    plot_atom_overlay(ax, mol, atom_Rs=atom_Rs, probe_R=probe_R)
+    plot_atom_overlay(ax, mol, atom_Rs=atom_Rs, probe_R=probe_R, epair_rc=epair_rc,
+                      vdw_circles=vdw_circles, contact_circles=contact_circles, probe_q=probe_q)
     ff_label = FF_LABELS.get(ff_type, ff_type)
     ax.set_title(f'{ff_label} | {probe_ename} (q={probe_q:+.1f}e){title_suffix}')
     ax.set_xlabel('x [Å]')
@@ -316,7 +435,8 @@ def set_epair_charges(mol, epair_charge=-0.2):
     return mol
 
 def load_molecule_with_epairs(xyz_path, atom_types=None, epair_charge=-0.2,
-                               charge_mode='xyz', etypes=None, Q_target=0.0):
+                               charge_mode='xyz', etypes=None, Q_target=0.0,
+                               epair_dist=0.5, sigma_dist=0.0):
     """Load XYZ molecule, assign charges, add electron pairs.
 
     Args:
@@ -326,6 +446,7 @@ def load_molecule_with_epairs(xyz_path, atom_types=None, epair_charge=-0.2,
         charge_mode: 'xyz' = use 4th column from file, 'qeq' = charge equilibration
         etypes: dict from read_element_types (needed for QEq)
         Q_target: total charge constraint for QEq
+        epair_dist: distance of epair from host atom [Å] (default 0.5, use 1.4 for Hbond mode)
     """
     mol = AtomicSystem(fname=xyz_path)
     mol.neighs()
@@ -350,6 +471,18 @@ def load_molecule_with_epairs(xyz_path, atom_types=None, epair_charge=-0.2,
     # --- Add electron pairs (place_electron_pair extends qs automatically) ---
     mol.add_electron_pairs()
 
+    # --- Rescale epair distances if needed ---
+    if epair_dist != 0.5:
+        ep_mask = np.array([e == 'E' for e in mol.enames])
+        ep_indices = np.where(ep_mask)[0]
+        for i in ep_indices:
+            host = next(j for j in mol.ngs[i] if mol.enames[j] != 'E')
+            direction = mol.apos[i] - mol.apos[host]
+            norm = np.linalg.norm(direction)
+            if norm > 1e-10:
+                mol.apos[i] = mol.apos[host] + direction / norm * epair_dist
+        print(f"Rescaled {len(ep_indices)} epair distances to {epair_dist} Å")
+
     # --- Set epair charges (subtract from host) ---
     if epair_charge != 0.0:
         set_epair_charges(mol, epair_charge=epair_charge)
@@ -358,7 +491,60 @@ def load_molecule_with_epairs(xyz_path, atom_types=None, epair_charge=-0.2,
         mol.qs[ep_mask] = 0.0
         print(f"Electron pair charges set to 0")
 
+    # --- Add sigma holes (dummy atoms type 'S') ---
+    if sigma_dist > 0:
+        add_sigma_holes(mol, sigma_dist=sigma_dist)
+
     return mol
+
+def plot_summary(mol_names, etypes, atom_types, args):
+    """Generate a single figure with one panel per molecule using ambivalent probe.
+    Probe: O-like with radius args.probe_R (default 1.5), charge 0.3e, Morse+Hbond only."""
+    probe_R = args.probe_R if args.probe_R else 1.5
+    probe_q = 0.3
+    n = len(mol_names)
+    n_cols = min(4, n)
+    n_rows = (n + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7*n_cols, 6*n_rows), squeeze=False)
+    fig.suptitle(f'Ambivalent probe: R={probe_R}Å q={probe_q}e | Morse+Hbond(epair+sigma)', fontsize=12)
+    for idx, mol_name in enumerate(mol_names):
+        xyz_path = os.path.join(REPO_ROOT, 'data', 'xyz', f'{mol_name}.xyz')
+        if not os.path.exists(xyz_path):
+            print(f"SKIP {mol_name}: {xyz_path} not found")
+            continue
+        print(f"\n{'='*60}\n  {mol_name} (summary)\n{'='*60}")
+        mol = load_molecule_with_epairs(xyz_path, atom_types=atom_types,
+                                         epair_charge=args.epair_charge, charge_mode=args.charge_mode,
+                                         etypes=etypes, Q_target=0.0,
+                                         epair_dist=args.epair_dist,
+                                         sigma_dist=args.sigma_dist if args.Hs != 0 else 0.0)
+        type_map = {'C': 'C_2', 'O': 'O_2', 'H': 'H'}
+        REQs = get_REQs(mol, atom_types, type_map=type_map)
+        # Override probe R in REQs by using a custom probe_REQ path
+        Emap, xs, ys, extent = compute_ff_map(
+            mol, REQs, 'O', probe_q, z_height=args.z_height,
+            margin=args.margin, step=args.step, ff_type='morseH_amb', atom_types=atom_types,
+            He=args.He, rc=args.rc, w=args.w, Hs=args.Hs, sigma_dist=args.sigma_dist,
+            probe_R_override=probe_R)
+        print(f"  morseH_amb | O q={probe_q}e R={probe_R}Å: E_range=[{Emap.min():.3f}, {Emap.max():.3f}] eV")
+        ax = axes[idx // n_cols, idx % n_cols]
+        vmax = max(abs(Emap.min()), 0.01)
+        im = ax.imshow(Emap, origin='lower', extent=extent, aspect='equal', cmap='RdBu_r',
+                       vmin=-vmax, vmax=vmax)
+        plt.colorbar(im, ax=ax, label='Energy [eV]')
+        # Show both epair and sigma circles for ambivalent probe
+        plot_atom_overlay(ax, mol, atom_Rs=REQs[:, 0], probe_R=probe_R,
+                          epair_rc=args.rc if (args.He != 0 or args.Hs != 0) else None,
+                          vdw_circles=args.vdw_circles, contact_circles=args.contact_circles,
+                          probe_q=0.0)  # 0.0 → show both epair and sigma circles
+        ax.set_title(f'{mol_name}', fontsize=11)
+        ax.set_xlabel('x [Å]')
+        ax.set_ylabel('y [Å]')
+    # Hide unused axes
+    for idx in range(len(mol_names), n_rows * n_cols):
+        axes[idx // n_cols, idx % n_cols].set_visible(False)
+    fig.tight_layout()
+    return fig
 
 def main():
     import argparse
@@ -370,12 +556,23 @@ def main():
     parser.add_argument('--xyz', default=None, help='XYZ file path')
     parser.add_argument('--charge-mode', default='xyz', choices=['xyz', 'qeq'], help='Charge source')
     parser.add_argument('--epair-charge', type=float, default=-0.2, help='Electron pair charge [e]')
+    parser.add_argument('--epair-dist', type=float, default=0.5, help='Epair distance from host [Å] (use 1.4 for Hbond mode)')
+    parser.add_argument('--He', type=float, default=-1.0, help='Hbond pseudo charge of epair [e] (negative=electron-like, 0=disabled)')
+    parser.add_argument('--Hs', type=float, default=0.0, help='Sigma hole pseudo charge on H bonded to O/N [e] (positive, 0=disabled)')
+    parser.add_argument('--sigma-dist', type=float, default=1.0, help='Sigma hole distance from H atom [Å]')
+    parser.add_argument('--rc', type=float, default=3.0, help='Hbond cutoff radius [Å]')
+    parser.add_argument('--w', type=float, default=1.0, help='Hbond Lorentzian width [Å]')
     parser.add_argument('--margin', type=float, default=4.0, help='Grid margin [Å]')
     parser.add_argument('--step', type=float, default=0.1, help='Grid step [Å]')
     parser.add_argument('--z-height', type=float, default=0.0, help='Probe plane z [Å]')
     parser.add_argument('--quiver', choices=['efield', 'rep', 'auto', 'none'], default='auto',
                         help='Overlay arrows: efield (Coulomb), rep (Pauli repulsion), auto (efield on morseQ, rep on morse), none')
     parser.add_argument('--quiver-step', type=int, default=8, help='Arrow subsampling step (grid points)')
+    parser.add_argument('--vdw-circles', action='store_true', default=True, help='Draw vdW radius circles (default on)')
+    parser.add_argument('--no-vdw-circles', dest='vdw_circles', action='store_false', help='Hide vdW radius circles')
+    parser.add_argument('--contact-circles', action='store_true', default=False, help='Draw Ri+Rj contact distance circles (default off)')
+    parser.add_argument('--probe-R', type=float, default=None, help='Override probe vdW radius [Å] (for ambivalent probe)')
+    parser.add_argument('--summary', action='store_true', default=False, help='Generate summary plot: one panel per molecule with ambivalent probe')
     parser.add_argument('--save', default=None, help='Save figure to PNG path (instead of showing)')
     parser.add_argument('--batch', nargs='+', default=None,
                         help='Batch mode: list of XYZ basenames (e.g. uracil CH2O pyridine)')
@@ -391,6 +588,19 @@ def main():
     else:
         xyz_path = args.xyz or os.path.join(data_path, 'xyz', 'CH2O.xyz')
         mol_names = [os.path.splitext(os.path.basename(xyz_path))[0]]
+
+    if args.summary:
+        fig = plot_summary(mol_names, etypes, atom_types, args)
+        if args.save:
+            out_dir = args.save if os.path.isdir(args.save) else os.path.dirname(args.save)
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, 'ff_summary.png')
+            fig.savefig(out_path, dpi=150, bbox_inches='tight')
+            print(f"Saved summary: {out_path}")
+            plt.close(fig)
+        else:
+            plt.show()
+        return
 
     for mol_name in mol_names:
         xyz_path = os.path.join(data_path, 'xyz', f'{mol_name}.xyz')
@@ -416,7 +626,9 @@ def plot_molecule(xyz_path, mol_name, etypes, atom_types, args):
     """Build and return the figure for one molecule. Returns None on error."""
     mol = load_molecule_with_epairs(xyz_path, atom_types=atom_types,
                                      epair_charge=args.epair_charge, charge_mode=args.charge_mode,
-                                     etypes=etypes, Q_target=0.0)
+                                     etypes=etypes, Q_target=0.0,
+                                     epair_dist=args.epair_dist,
+                                     sigma_dist=args.sigma_dist if args.Hs != 0 else 0.0)
 
     print(f"\nMolecule: {len(mol.enames)} atoms (incl. electron pairs)")
     for i, e in enumerate(mol.enames):
@@ -454,24 +666,27 @@ def plot_molecule(xyz_path, mol_name, etypes, atom_types, args):
         for icol, ff_type in enumerate(ff_types):
             Emap, xs, ys, extent = compute_ff_map(
                 mol, REQs, probe_ename, probe_q, z_height=args.z_height,
-                margin=args.margin, step=args.step, ff_type=ff_type, atom_types=atom_types)
+                margin=args.margin, step=args.step, ff_type=ff_type, atom_types=atom_types,
+                He=args.He, rc=args.rc, w=args.w, Hs=args.Hs, sigma_dist=args.sigma_dist)
             print(f"{ff_type} | {probe_ename} q={probe_q:+.1f}e: E_range=[{Emap.min():.3f}, {Emap.max():.3f}] eV")
             probe_R = atom_types[probe_ename].RvdW if probe_ename in atom_types else None
             ax = axes[irow, icol]
             plot_ff_panel(ax, Emap, extent, mol, probe_ename, probe_q, ff_type,
-                          z_height=args.z_height, atom_Rs=REQs[:, 0], probe_R=probe_R)
-            # Quiver overlay: auto selects per ff_type
+                          z_height=args.z_height, atom_Rs=REQs[:, 0], probe_R=probe_R,
+                          epair_rc=args.rc if (args.He != 0 or args.Hs != 0) else None,
+                          vdw_circles=args.vdw_circles, contact_circles=args.contact_circles)
+            # Quiver overlay: only on first 2 columns (morse, morseQ)
             s = args.quiver_step
-            if args.quiver == 'auto':
-                if ff_type in ('morseQ', 'morseD') and Ex_ef is not None:
+            if icol < 2 and args.quiver == 'auto':
+                if ff_type in ('morseQ',) and Ex_ef is not None:
                     Ux, Uy = Ex_ef[::s, ::s], Ey_ef[::s, ::s]
                 elif ff_type == 'morse' and Fx_rep is not None:
                     Ux, Uy = Fx_rep[::s, ::s], Fy_rep[::s, ::s]
                 else:
                     Ux = Uy = None
-            elif args.quiver == 'efield' and Ex_ef is not None:
+            elif icol < 2 and args.quiver == 'efield' and Ex_ef is not None:
                 Ux, Uy = Ex_ef[::s, ::s], Ey_ef[::s, ::s]
-            elif args.quiver == 'rep' and Fx_rep is not None:
+            elif icol < 2 and args.quiver == 'rep' and Fx_rep is not None:
                 Ux, Uy = Fx_rep[::s, ::s], Fy_rep[::s, ::s]
             else:
                 Ux = Uy = None

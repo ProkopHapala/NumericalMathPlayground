@@ -17,9 +17,10 @@ Core Python package for molecular modeling — force fields, vibrational analysi
 
 ## Subpackages
 
-- **FFs/** — Force fields and vibrational analysis (UFF, normal modes)
+- **FFs/** — Force fields and vibrational analysis (UFF, normal modes, rigid-body pairwise FF)
 - **DFTB/** — DFTB+ integration (ctypes wrapper, basis parser, GPU density projection)
 - **kernels/** — OpenCL source files (`.cl`), concatenated at build time
+- **GUI/** — Interactive visualization: `RigidBodyVispy.py` (Vispy+PyQt5 viewer for RigidBodyPairFF with potential map, mouse picking, parameter controls)
 
 ## Usage
 

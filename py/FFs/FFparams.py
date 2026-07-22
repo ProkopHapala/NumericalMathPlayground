@@ -358,7 +358,7 @@ def make_REQs_from_enames(enames, qs, atom_types, type_map=None):
 def load_xyz_with_REQs(fname, atom_types=None, type_map=None):
     """Load XYZ file and build SPFF REQ parameters from AtomTypes.dat.
     Returns: positions (N,3) float64, REQs (N,4) float32, enames list, Zs array, lvec (3,3) or None"""
-    from spammm import atomicUtils as au
+    from .. import atomicUtils as au
     apos, Zs, enames, qs, comment = au.load_xyz(fname=fname, bReadN=True)
     lvec = None
     if isinstance(comment, str):

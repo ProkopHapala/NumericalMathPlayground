@@ -10,6 +10,7 @@ GPU-accelerated force fields and vibrational analysis. All OpenCL modules inheri
 - **Vibrations.py** — Normal-mode analysis plus reusable reduced potentials: finite-difference Hessians, mass-weighted rigid projection, mass-normalized modes, and `ReducedPolynomialPotential` for scaled-coordinate cubic/quartic energy-force fits. `run_vibrations()` is the main mode-analysis entry point.
 - **BRBFFF.py** — Persistent OpenCL bridge for two blended rigid-body frames: skins atom positions from two quaternion poses, reduces arbitrary resident atomic forces to exact frame-origin wrenches by `J.T @ F`, and applies capped overdamped GPU frame relaxation.  External Coulomb/Morse/UFF kernels can consume its `atom_pos` buffer and write its `atom_force` buffer without a host round-trip.
 - **VibrationPlot.py** — Top-view normal-mode figures: in-plane arrows + seismic z-circles. `make_mode_figure()`, `plot_mode_topview()`, `plot_softest_modes()`, `save_summary()`.
+- **RigidBodyDynamics.py** — GPU rigid-body dynamics with pairwise molecule-molecule interactions. `RigidBodyPairFF` class: 6-DOF rigid body (3 translation + quaternion rotation) interacting with a static molecule via Morse+Coulomb (atom-atom) and Lorentzian Hbond/sigma-hole (atom-epair) forces. Electron pairs and sigma holes are auto-generated as dummy atoms with pseudo-charges in REQ.z, enabling branch-free GPU execution. Supports FIRE relaxation, z-harmonic constraint, and anchor springs. See `topics/NonBondingFFs/` for demos and full documentation.
 
 ## Data flow
 
@@ -36,6 +37,7 @@ UFF uses three OpenCL files concatenated at build time (see `kernels/README.md`)
 | `Forces.cl` | Inline pairwise potentials: `getLJQH`, `getMorseQH`, `getCoulomb` |
 | `UFF.cl` | UFF bonding kernels: bonds, angles, dihedrals, inversions, force assembly |
 | `BRBFFF.cl` | Two-frame skinning plus local-memory `J.T @ F` force/torque reduction |
+| `rigid.cl` | Rigid body dynamics kernels: 6-DOF integration, FIRE, pairwise molecule-molecule forces (Morse+Coulomb+Hbond+sigma-hole) |
 
 ## Usage
 
@@ -67,3 +69,36 @@ gpu.relax_step(linear_step=1e-3, angular_step=1e-4,
 ```
 
 The torque is about its own frame origin, matching the direct pose update `p += dp`, `q ← exp(dtheta) q`.  Thus `relax_step` needs no physical masses: with `damping=0` it is capped generalized gradient descent.  Damping is only an optional numerical smoother.  The current GPU path adds **no** fitted internal relative-frame force, so an isolated distorted molecule will not recover unless the force evaluator supplies intramolecular forces; porting that restoring potential is the next required step.  For strict monotonic energy descent, an external force kernel must also provide energy for backtracking; otherwise choose conservative caps/steps.  GPU/CPU parity must be run after an OpenCL device is available.
+
+## RigidBodyPairFF usage
+
+```python
+from py.FFs.FFparams import load_xyz_with_REQs
+from py.FFs.RigidBodyDynamics import RigidBodyPairFF
+
+static_apos, static_REQs, static_enames, _, _ = load_xyz_with_REQs('data/xyz/uracil.xyz')
+dyn_apos, dyn_REQs, dyn_enames, _, _ = load_xyz_with_REQs('data/xyz/HCOOH.xyz')
+
+rbd = RigidBodyPairFF.from_two_molecules(
+    dyn_apos=dyn_apos, dyn_enames=dyn_enames, dyn_REQs=dyn_REQs,
+    static_apos=static_apos, static_enames=static_enames, static_REQs=static_REQs,
+    body_pos=[0, 0, 3.0],  # initial CoM position
+    He=-1.0, Hs=1.0,       # epair / sigma-hole pseudo-charges
+    rc=3.0, w=1.0,          # Hbond cutoff and Lorentzian width
+    morse_alpha=1.8, k_z=5.0, z_target=0.0,
+)
+
+# Headless FIRE relaxation
+result = rbd.relax_pairff(max_steps=300, dt=0.02, f_tol=1e-4, t_tol=1e-4)
+print(f"Converged: {result['converged']} in {result['steps']} steps, E={result['E']:.6f}")
+
+# Interactive visualization
+from py.GUI.RigidBodyVispy import RigidBodyVispy
+vis = RigidBodyVispy(rbd, dt=0.02, steps_per_frame=10)
+vis.run()
+```
+
+Electron pairs (lone pairs on O/N) and sigma holes (on H bonded to O/N) are
+auto-generated as dummy atoms. Pseudo-charges He/Hs are stored in REQ.z,
+enabling branch-free GPU evaluation. See `topics/NonBondingFFs/README.md` for
+full parameter documentation and testing report.
