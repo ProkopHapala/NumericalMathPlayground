@@ -22,13 +22,14 @@ This gives a true XY orthographic projection. Mouse wheel adjusts scale_factor
 (exponential zoom), arrow keys pan the camera center.
 
 Features:
-  - PyQt5 side panel with editable FF parameters: He, Hs, rc, w, k_z, morse_alpha,
-    z_target, L_epair (epair distance), L_sigma (sigma hole distance), dt, steps/frame
+  - PyQt5 side panel: FF params, kernel mode, compact map probe (H+/O− presets + R0/E0/Q),
+    dt, steps/frame
   - Orthographic top-down (XY) camera, white background
   - Mouse wheel zoom, arrow key pan
   - LMB click+drag on dynamic atoms for anchor spring picking
   - Potential map background: Morse + epair Hbond + sigma-hole (no Coulomb),
-    matching ff_map.py's morseH_only mode. Probe element and charge selectable.
+    matching ff_map.py's morseH_only mode. Presets H+(q=+0.4) / O−(q=-0.4);
+    R0, E0, Q editable; element combo still fills R0/E0 from AtomTypes.
   - Epairs rendered as cyan dots, sigma holes as magenta dots (same size, semi-transparent)
   - Faint dummy-bond lines from epairs (cyan) and sigma holes (magenta) to host atoms
   - Real atom bonds rendered as independent line segments (connect='segments', not strip)
@@ -82,19 +83,13 @@ MORSE_BETA = 1.7
 # ==================================================================
 
 def compute_potential_map(static_apos, static_REQ, static_enames, static_types,
-                          probe_ename, probe_q, z_height=0.0, margin=4.0, step=0.1,
+                          probe_R0, probe_E0, probe_q, z_height=0.0, margin=4.0, step=0.1,
                           He=-1.0, Hs=0.0, rc=3.0, w=1.0, atom_types=None):
     """Compute 2D Morse + Hbond + SigmaHole energy map (no Coulomb).
 
-    Matches ff_map.py compute_ff_map with ff_type='morseH_only'.
-    Probe REQ comes from AtomTypes.dat (same as ff_map.py).
-    Epairs (type=1) use He as pseudo-charge, sigma holes (type=2) use Hs.
-    Pseudo-charge is stored in REQ.z for epairs/sigma-holes.
-
-    Returns (Emap, xs, ys, extent) where extent=[xmin,xmax,ymin,ymax].
+    Probe specified by R0, E0 (EvdW depth), Q. Mixing uses e=sqrt(E0).
     """
     apos = np.asarray(static_apos, dtype=np.float64)
-    n = len(static_enames)
 
     xmin, ymin = apos[:, 0].min() - margin, apos[:, 1].min() - margin
     xmax, ymax = apos[:, 0].max() + margin, apos[:, 1].max() + margin
@@ -102,14 +97,8 @@ def compute_potential_map(static_apos, static_REQ, static_enames, static_types,
     ys = np.arange(ymin, ymax + step, step)
     nx, ny = len(xs), len(ys)
 
-    # Probe REQ from AtomTypes.dat (same as ff_map.py)
-    probe_REQ = np.zeros(4)
-    if atom_types and probe_ename in atom_types:
-        at = atom_types[probe_ename]
-        probe_REQ[0] = at.RvdW
-        probe_REQ[1] = np.sqrt(at.EvdW)
-        probe_REQ[3] = at.Hb
-    probe_REQ[2] = probe_q  # charge set by user
+    probe_REQ = np.array([float(probe_R0), np.sqrt(max(float(probe_E0), 0.0)),
+                          float(probe_q), 0.0], dtype=np.float64)
 
     # Mixed REQs (arithmetic R, geometric E, product Q, product H)
     REQs = np.asarray(static_REQ, dtype=np.float64)
@@ -172,6 +161,66 @@ def compute_potential_map(static_apos, static_REQ, static_enames, static_types,
     return Emap, xs, ys, extent
 
 
+def _load_compact_exp():
+    """Import compact-exp helpers from fit_radial.py (shared reference)."""
+    import importlib.util
+    path = os.path.join(REPO_ROOT, 'topics', 'NonBondingFFs', 'fit_radial.py')
+    spec = importlib.util.spec_from_file_location('fit_radial_nbff', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.compact_exp_force_over_r, float(getattr(mod, 'MORSE_BETA', MORSE_BETA))
+
+
+def compute_potential_map_unified(static_apos, static_REQ, static_enames, static_types,
+                                  probe_R0, probe_E0, probe_q, z_height=0.0, margin=4.0, step=0.1,
+                                  He=-1.0, Hs=0.0, w=0.7, beta=1.7, atom_types=None):
+    """2D map for unified compact-exp PairFF (no Coulomb), matching GPU mixing."""
+    compact_EF, _ = _load_compact_exp()
+    apos = np.asarray(static_apos, dtype=np.float64)
+    REQs = np.asarray(static_REQ, dtype=np.float64).copy()
+    types = np.asarray(static_types, dtype=np.int32)
+    for i, t in enumerate(types):
+        if t == 1:
+            REQs[i, 2] = He
+            REQs[i, 3] = w
+        elif t == 2:
+            REQs[i, 2] = Hs
+            REQs[i, 3] = w
+        else:
+            REQs[i, 3] = 0.0
+
+    xmin, ymin = apos[:, 0].min() - margin, apos[:, 1].min() - margin
+    xmax, ymax = apos[:, 0].max() + margin, apos[:, 1].max() + margin
+    xs = np.arange(xmin, xmax + step, step)
+    ys = np.arange(ymin, ymax + step, step)
+    X, Y = np.meshgrid(xs, ys)
+    Emap = np.zeros_like(X, dtype=np.float64)
+
+    probe_R = float(probe_R0)
+    probe_e = float(np.sqrt(max(float(probe_E0), 0.0)))
+    gi, wi, Qi = 1.0, 0.0, float(probe_q)
+
+    for j in range(len(types)):
+        gj = 1.0 if types[j] == 0 else 0.0
+        gij = gi * gj
+        R0 = gij * (probe_R + REQs[j, 0])
+        wij = wi + REQs[j, 3]
+        alpha = gij
+        attr = -min(0.0, Qi * REQs[j, 2])
+        both_dummy = 1.0 - min(gi + gj, 1.0)
+        E0 = (attr if gij < 0.5 else probe_e * REQs[j, 1]) * (1.0 - both_dummy)
+        if E0 == 0.0:
+            continue
+        dx = X - apos[j, 0]
+        dy = Y - apos[j, 1]
+        dz = z_height - apos[j, 2]
+        r = np.sqrt(dx * dx + dy * dy + dz * dz)
+        V, _ = compact_EF(r, R0, E0, beta, power=8, alpha=alpha, w=wij, soft_kind='sqrt')
+        Emap += V
+
+    return Emap, xs, ys, [xmin, xmax, ymin, ymax]
+
+
 def potential_to_rgba(Emap, vmin=None, vmax=None):
     """Convert energy map to RGBA using RdBu_r colormap (same as ff_map.py).
     Symmetric scale: vmax = max(|Emin|, 0.01), vmin = -vmax.
@@ -204,11 +253,12 @@ class ControlPanel(QtWidgets.QWidget):
 
     paramsChanged = QtCore.pyqtSignal()
 
-    def __init__(self, rbd, parent=None):
+    def __init__(self, rbd, atom_types=None, parent=None):
         super().__init__(parent)
         self.rbd = rbd
+        self.atom_types = atom_types or {}
         self.setWindowTitle("PairFF Controls")
-        self.setFixedWidth(280)
+        self.setFixedWidth(260)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(2)
@@ -234,6 +284,17 @@ class ControlPanel(QtWidgets.QWidget):
 
         self.lbl_E = QtWidgets.QLabel("E=0.0  |F|=0.0")
         gl.addWidget(self.lbl_E, 2, 0, 1, 3)
+
+        gl.addWidget(QtWidgets.QLabel("Kernel:"), 3, 0)
+        self.cmb_mode = QtWidgets.QComboBox()
+        self.cmb_mode.addItem("Legacy (Morse+Lorentz)", "legacy")
+        self.cmb_mode.addItem("Unified (compact exp)", "unified")
+        cur_mode = (rbd.pairff_params_host or {}).get('mode', getattr(rbd, 'pairff_mode', 'legacy'))
+        idx = self.cmb_mode.findData(cur_mode)
+        if idx >= 0:
+            self.cmb_mode.setCurrentIndex(idx)
+        self.cmb_mode.currentIndexChanged.connect(self.on_param_changed)
+        gl.addWidget(self.cmb_mode, 3, 1, 1, 2)
 
         layout.addWidget(grp_sim)
 
@@ -271,30 +332,65 @@ class ControlPanel(QtWidgets.QWidget):
 
         layout.addWidget(grp_ff)
 
-        # --- Probe atom for potential map ---
-        grp_probe = QtWidgets.QGroupBox("Potential Map Probe")
+        # --- Probe for potential map (compact) ---
+        grp_probe = QtWidgets.QGroupBox("Map probe")
         pl = QtWidgets.QGridLayout(grp_probe)
+        pl.setContentsMargins(4, 4, 4, 4)
         pl.setSpacing(2)
+        pl.setHorizontalSpacing(3)
 
-        pl.addWidget(QtWidgets.QLabel("Element:"), 0, 0)
+        def _tiny_spin(vmin, vmax, step, decimals, val, maxw=56):
+            sp = QtWidgets.QDoubleSpinBox()
+            sp.setRange(vmin, vmax)
+            sp.setSingleStep(step)
+            sp.setDecimals(decimals)
+            sp.setValue(val)
+            sp.setMaximumWidth(maxw)
+            sp.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+            sp.setAlignment(QtCore.Qt.AlignRight)
+            return sp
+
+        # Row 0: H+ | O− | type | map | ↻
+        self.btn_probe_Hp = QtWidgets.QPushButton("H+")
+        self.btn_probe_Om = QtWidgets.QPushButton("O−")
+        for b in (self.btn_probe_Hp, self.btn_probe_Om):
+            b.setCheckable(True)
+            b.setFixedHeight(22)
+            b.setMaximumWidth(36)
+        self.btn_probe_Hp.setChecked(True)
+        self.btn_probe_Hp.setToolTip("H donor  q=+0.4e")
+        self.btn_probe_Om.setToolTip("O acceptor  q=-0.4e")
+        pl.addWidget(self.btn_probe_Hp, 0, 0)
+        pl.addWidget(self.btn_probe_Om, 0, 1)
+
         self.cmb_probe = QtWidgets.QComboBox()
         self.cmb_probe.addItems(['H', 'C', 'N', 'O', 'F', 'S', 'Cl'])
         self.cmb_probe.setCurrentText('H')
-        pl.addWidget(self.cmb_probe, 0, 1)
+        self.cmb_probe.setMaximumWidth(48)
+        self.cmb_probe.setToolTip("Element → fills R0, E0")
+        pl.addWidget(self.cmb_probe, 0, 2)
 
-        pl.addWidget(QtWidgets.QLabel("Charge:"), 1, 0)
-        self.spin_probe_q = QtWidgets.QDoubleSpinBox()
-        self.spin_probe_q.setRange(-5, 5)
-        self.spin_probe_q.setValue(0.4)
-        self.spin_probe_q.setSingleStep(0.05)
-        pl.addWidget(self.spin_probe_q, 1, 1)
-
-        self.chk_map = QtWidgets.QCheckBox("Show potential map")
+        self.chk_map = QtWidgets.QCheckBox("map")
         self.chk_map.setChecked(True)
-        pl.addWidget(self.chk_map, 2, 0, 1, 2)
+        pl.addWidget(self.chk_map, 0, 3)
 
-        self.btn_recompute = QtWidgets.QPushButton("Recompute Map")
-        pl.addWidget(self.btn_recompute, 3, 0, 1, 2)
+        self.btn_recompute = QtWidgets.QPushButton("↻")
+        self.btn_recompute.setFixedSize(28, 22)
+        self.btn_recompute.setToolTip("Recompute map")
+        pl.addWidget(self.btn_recompute, 0, 4)
+
+        # Row 1: R0 E0 Q
+        self.spin_probe_R0 = _tiny_spin(0.0, 5.0, 0.01, 3, 1.443, maxw=50)
+        self.spin_probe_E0 = _tiny_spin(0.0, 1.0, 1e-4, 5, 0.00191, maxw=56)
+        self.spin_probe_q = _tiny_spin(-5.0, 5.0, 0.05, 2, 0.40, maxw=42)
+        row_req = QtWidgets.QHBoxLayout()
+        row_req.setSpacing(2)
+        row_req.setContentsMargins(0, 0, 0, 0)
+        for lbl, sp in (("R0", self.spin_probe_R0), ("E0", self.spin_probe_E0), ("Q", self.spin_probe_q)):
+            row_req.addWidget(QtWidgets.QLabel(lbl))
+            row_req.addWidget(sp)
+        row_req.addStretch(1)
+        pl.addLayout(row_req, 1, 0, 1, 5)
 
         layout.addWidget(grp_probe)
 
@@ -316,8 +412,66 @@ class ControlPanel(QtWidgets.QWidget):
         self.btn_reset.clicked.connect(self.on_reset)
         self.btn_fire.clicked.connect(self.on_fire_toggle)
         self.btn_recompute.clicked.connect(self.on_recompute_map)
-        self.cmb_probe.currentTextChanged.connect(self.on_recompute_map)
-        self.spin_probe_q.valueChanged.connect(self.on_recompute_map)
+        self.btn_probe_Hp.clicked.connect(lambda: self.on_probe_preset('Hp'))
+        self.btn_probe_Om.clicked.connect(lambda: self.on_probe_preset('Om'))
+        self.cmb_probe.currentTextChanged.connect(self.on_probe_element_changed)
+        self.spin_probe_R0.valueChanged.connect(self.on_probe_manual_edit)
+        self.spin_probe_E0.valueChanged.connect(self.on_probe_manual_edit)
+        self.spin_probe_q.valueChanged.connect(self.on_probe_manual_edit)
+        self.chk_map.stateChanged.connect(self.on_recompute_map)
+
+        self._apply_probe_from_element('H', q=0.4, preset='Hp')
+
+    def _set_probe_spins(self, R0, E0, Q):
+        for sp in (self.spin_probe_R0, self.spin_probe_E0, self.spin_probe_q):
+            sp.blockSignals(True)
+        self.spin_probe_R0.setValue(float(R0))
+        self.spin_probe_E0.setValue(float(E0))
+        self.spin_probe_q.setValue(float(Q))
+        for sp in (self.spin_probe_R0, self.spin_probe_E0, self.spin_probe_q):
+            sp.blockSignals(False)
+
+    def _apply_probe_from_element(self, ename, q=None, preset=None):
+        """Fill R0/E0 from AtomTypes; optionally set Q and preset button state."""
+        R0, E0 = 1.5, 0.002
+        if ename in self.atom_types:
+            at = self.atom_types[ename]
+            R0, E0 = float(at.RvdW), float(at.EvdW)
+        if q is None:
+            q = self.spin_probe_q.value()
+        self.cmb_probe.blockSignals(True)
+        self.cmb_probe.setCurrentText(ename)
+        self.cmb_probe.blockSignals(False)
+        self._set_probe_spins(R0, E0, q)
+        if preset == 'Hp':
+            self.btn_probe_Hp.setChecked(True)
+            self.btn_probe_Om.setChecked(False)
+        elif preset == 'Om':
+            self.btn_probe_Hp.setChecked(False)
+            self.btn_probe_Om.setChecked(True)
+        elif preset is None:
+            pass
+        else:
+            self.btn_probe_Hp.setChecked(False)
+            self.btn_probe_Om.setChecked(False)
+
+    def on_probe_preset(self, which):
+        if which == 'Hp':
+            self._apply_probe_from_element('H', q=0.4, preset='Hp')
+        else:
+            self._apply_probe_from_element('O', q=-0.4, preset='Om')
+        self.on_recompute_map()
+
+    def on_probe_element_changed(self, ename):
+        self._apply_probe_from_element(ename, q=self.spin_probe_q.value(), preset=None)
+        self.btn_probe_Hp.setChecked(False)
+        self.btn_probe_Om.setChecked(False)
+        self.on_recompute_map()
+
+    def on_probe_manual_edit(self):
+        self.btn_probe_Hp.setChecked(False)
+        self.btn_probe_Om.setChecked(False)
+        self.on_recompute_map()
 
     def on_param_changed(self):
         rbd = self.rbd
@@ -330,10 +484,14 @@ class ControlPanel(QtWidgets.QWidget):
         z_target = self.spins['z_target'].value()
         epair_dist = self.spins['epair_dist'].value()
         sigma_dist = self.spins['sigma_dist'].value()
-        rbd.init_pairff(He=He, rc=rc, w=w, k_z=k_z, morse_alpha=alpha, z_target=z_target, Hs=Hs)
-        rbd.pairff_params_host['epair_dist'] = epair_dist
-        rbd.pairff_params_host['sigma_dist'] = sigma_dist
+        mode = self.cmb_mode.currentData()
+        beta = (rbd.pairff_params_host or {}).get('beta', 1.7)
+        rbd.init_pairff(He=He, rc=rc, w=w, k_z=k_z, morse_alpha=alpha, z_target=z_target,
+                        Hs=Hs, epair_dist=epair_dist, sigma_dist=sigma_dist, mode=mode, beta=beta)
         self.paramsChanged.emit()
+
+    def get_pairff_mode(self):
+        return self.cmb_mode.currentData()
 
     def on_reset(self):
         z = np.zeros((self.rbd.n_bodies, 4), dtype=np.float32)
@@ -348,7 +506,8 @@ class ControlPanel(QtWidgets.QWidget):
         self.paramsChanged.emit()
 
     def get_probe_params(self):
-        return self.cmb_probe.currentText(), self.spin_probe_q.value()
+        """Return (R0, E0, Q) for the potential-map probe."""
+        return (self.spin_probe_R0.value(), self.spin_probe_E0.value(), self.spin_probe_q.value())
 
     def get_dt(self):
         return self.spins['dt'].value()
@@ -466,7 +625,7 @@ class RigidBodyVispy:
         hlayout.addWidget(canvas_native, 1)
 
         # --- Control panel ---
-        self.panel = ControlPanel(rbd)
+        self.panel = ControlPanel(rbd, atom_types=self._atom_types)
         self.panel.btn_run.clicked.connect(self.on_run_toggle)
         self.panel.paramsChanged.connect(self._recompute_map)
         hlayout.addWidget(self.panel)
@@ -631,16 +790,25 @@ class RigidBodyVispy:
         if not self.panel.show_map():
             self.map_image.visible = False
             return
-        probe_ename, probe_q = self.panel.get_probe_params()
+        probe_R0, probe_E0, probe_q = self.panel.get_probe_params()
         He = self.panel.spins['He'].value()
         Hs = self.panel.spins['Hs'].value()
         rc = self.panel.spins['rc'].value()
         w = self.panel.spins['w'].value()
-        Emap, xs, ys, extent = compute_potential_map(
-            self.rbd.static_apos_host, self.rbd.static_REQ_host,
-            self.rbd.static_enames, self.rbd.static_type_host,
-            probe_ename, probe_q, z_height=0.0, margin=4.0, step=0.1,
-            He=He, Hs=Hs, rc=rc, w=w, atom_types=self._atom_types)
+        mode = self.panel.get_pairff_mode()
+        if mode == 'unified':
+            beta = (self.rbd.pairff_params_host or {}).get('beta', 1.7)
+            Emap, xs, ys, extent = compute_potential_map_unified(
+                self.rbd.static_apos_host, self.rbd.static_REQ_host,
+                self.rbd.static_enames, self.rbd.static_type_host,
+                probe_R0, probe_E0, probe_q, z_height=0.0, margin=4.0, step=0.1,
+                He=He, Hs=Hs, w=w, beta=beta)
+        else:
+            Emap, xs, ys, extent = compute_potential_map(
+                self.rbd.static_apos_host, self.rbd.static_REQ_host,
+                self.rbd.static_enames, self.rbd.static_type_host,
+                probe_R0, probe_E0, probe_q, z_height=0.0, margin=4.0, step=0.1,
+                He=He, Hs=Hs, rc=rc, w=w)
         rgba = potential_to_rgba(Emap)
         self.map_image.set_data(rgba)
         # Set transform to map image pixels to world coordinates

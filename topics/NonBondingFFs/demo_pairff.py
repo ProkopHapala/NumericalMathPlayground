@@ -6,20 +6,19 @@ force field interactions with electron pairs, and launches interactive
 Vispy visualization with mouse picking.
 
 Usage:
-    python3 demo_pairff.py                    # interactive Vispy
+    python3 demo_pairff.py                    # interactive Vispy (legacy kernel)
+    python3 demo_pairff.py --pairff-mode unified
     python3 demo_pairff.py --no-vis           # headless relaxation test
     python3 demo_pairff.py --no-vis --steps 500  # custom step count
 
-TODO (future): Replace the current 4-loop interaction model (atom-atom
-Morse+Coulomb, atom-epair Lorentzian, epair-atom Lorentzian, epair-epair
-skipped) with the unified compact exponential family. This uses a single
-V = E0*y*(alpha*y-(1+alpha)) formula for all pair types, with per-pair
-parameters (R0, E0, alpha, w) from branch-free mixing rules. This eliminates
-the if(atom_idx < n_dyn_atoms) branch and the sorted array requirement.
+Kernels (switchable from GUI or --pairff-mode):
+  legacy  — rigid_body_pairff_kernel: 4-loop Morse+Coulomb / Lorentzian
+  unified — rigid_body_pairff_unified_kernel: single compact-exp loop
+            (y=(1-b*rho)^8, rho=r2/(sqrt(r2+w*w)+w))
 See:
   - topics/NonBondingFFs/fit_radial.py (--compact-exp-demo)
   - topics/NonBondingFFs/FastPairwisePotentials.chat.md (from line 1366)
-  - kernels/rigid.cl (rigid_body_pairff_kernel header comment)
+  - kernels/rigid.cl (rigid_body_pairff_unified_kernel)
 """
 import sys
 import os
@@ -48,11 +47,15 @@ def main():
     parser.add_argument('--dt', type=float, default=0.02, help='Time step')
     parser.add_argument('--he', type=float, default=-1.0, help='Hbond energy coefficient (epair pseudo-charge)')
     parser.add_argument('--hs', type=float, default=1.0, help='Sigma-hole pseudo charge (0=disabled)')
-    parser.add_argument('--rc', type=float, default=3.0, help='Hbond cutoff radius')
-    parser.add_argument('--alpha', type=float, default=1.8, help='Morse alpha')
+    parser.add_argument('--rc', type=float, default=3.0, help='Hbond cutoff radius (legacy)')
+    parser.add_argument('--alpha', type=float, default=1.8, help='Morse alpha (legacy) / ignored if --beta set')
+    parser.add_argument('--beta', type=float, default=None, help='Compact-exp beta (unified; default 1.7)')
+    parser.add_argument('--w', type=float, default=0.7, help='Soft-radius / Lorentzian width')
     parser.add_argument('--kz', type=float, default=5.0, help='Z-constraint strength')
     parser.add_argument('--epair-dist', type=float, default=1.4, help='Epair distance from host [Å]')
     parser.add_argument('--sigma-dist', type=float, default=1.0, help='Sigma hole distance from H [Å] (0=disabled)')
+    parser.add_argument('--pairff-mode', choices=['legacy', 'unified'], default='legacy',
+                        help='Force kernel: legacy Morse+Lorentzian or unified compact-exp')
     args = parser.parse_args()
 
     # --- Load molecules ---
@@ -61,6 +64,7 @@ def main():
 
     print(f"Static (uracil): {len(static_enames)} atoms — {static_enames}")
     print(f"Dynamic (HCOOH): {len(dyn_enames)} atoms — {dyn_enames}")
+    print(f"PairFF mode: {args.pairff_mode}")
 
     # Position dynamic molecule above static molecule center
     static_center = static_apos[:, :2].mean(axis=0)
@@ -71,9 +75,10 @@ def main():
         dyn_apos=dyn_apos, dyn_enames=dyn_enames, dyn_REQs=dyn_REQs,
         static_apos=static_apos, static_enames=static_enames, static_REQs=static_REQs,
         body_pos=body_pos,
-        He=args.he, rc=args.rc, morse_alpha=args.alpha, k_z=args.kz,
+        He=args.he, rc=args.rc, w=args.w, morse_alpha=args.alpha, k_z=args.kz,
         z_target=0.0, Hs=args.hs,
         epair_dist=args.epair_dist, sigma_dist=args.sigma_dist,
+        mode=args.pairff_mode, beta=args.beta,
     )
 
     # Print electron pair info
@@ -95,7 +100,7 @@ def main():
         print(f"Final quat:    {out['quats'][0]}")
         print(f"Final atom positions (world):")
         for i, (e, t) in enumerate(zip(rbd.enames, rbd.dyn_type_host)):
-            tag = 'epair' if t == 1 else e
+            tag = 'epair' if t == 1 else ('sigma' if t == 2 else e)
             print(f"  [{i:2d}] {tag:6s}  {out['atom_positions'][0, i, :3]}")
     else:
         # --- Interactive Vispy visualization ---
@@ -108,7 +113,7 @@ def main():
         print("  SPACE = run/stop simulation")
         print("  R = reset velocities, F = toggle FIRE")
         print("  ESC = quit")
-        print("  Side panel: adjust FF params, probe atom, potential map")
+        print("  Side panel: Kernel mode, FF params, probe atom, potential map")
         vis.run()
 
 
